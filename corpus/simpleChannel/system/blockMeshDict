@@ -1,0 +1,87 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  14
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// Straight rectangular channel for uniform potential flow.
+// Domain: x in [0, 2], y in [0, 1], z in [-0.5, 0.5] (empty BCs)
+// Flow in +x direction at U0 = 1.0 m/s.
+// Analytical solution: U = (1, 0, 0), Phi = x + C
+
+vertices
+(
+    (0   0   -0.5)  // 0
+    (2   0   -0.5)  // 1
+    (2   1   -0.5)  // 2
+    (0   1   -0.5)  // 3
+    (0   0    0.5)  // 4
+    (2   0    0.5)  // 5
+    (2   1    0.5)  // 6
+    (0   1    0.5)  // 7
+);
+
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) (40 10 1) simpleGrading (1 1 1)
+);
+
+edges
+();
+
+boundary
+(
+    inlet
+    {
+        type patch;
+        faces
+        (
+            (0 3 7 4)
+        );
+    }
+    outlet
+    {
+        type patch;
+        faces
+        (
+            (1 2 6 5)
+        );
+    }
+    wall_bottom
+    {
+        type symmetryPlane;
+        faces
+        (
+            (0 1 5 4)
+        );
+    }
+    wall_top
+    {
+        type symmetryPlane;
+        faces
+        (
+            (2 3 7 6)
+        );
+    }
+    frontAndBack
+    {
+        type empty;
+        faces
+        (
+            (0 1 2 3)
+            (4 5 6 7)
+        );
+    }
+);
+
+// ************************************************************************* //

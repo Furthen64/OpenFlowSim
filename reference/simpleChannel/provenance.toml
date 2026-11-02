@@ -1,0 +1,14 @@
+format_version = 1
+solver = "potentialFoam"
+distribution = "OpenFOAM Foundation"
+version = "14"
+commit = "ee38504348195ce2cd38b61a05b0079de8df9ff4"
+dirty_tree = true
+precision = "float64"
+platform = "linux64GccDPInt32Opt"
+compiler = "GCC (DPInt32Opt)"
+case_name = "simpleChannel"
+input_checksum = "ba2fb4d7717c78dad7bb2bdc38840d3a824ac58357a394e071c972093304ad1c"
+mesh_checksum = "c94470e92ba3a5b9f587dc6da20b1d4e65f8e2fd4b4ee21ccd9793dca08e6b41"
+generated_at = "2026-11-02T21:07:16Z"
+execution_time_s = 0.232304711

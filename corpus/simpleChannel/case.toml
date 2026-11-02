@@ -1,0 +1,25 @@
+# Case metadata for validation harness.
+# This file is read by the validation tooling to identify test cases.
+
+[case]
+name = "simpleChannel"
+description = "Uniform incompressible potential flow through a straight rectangular channel."
+solver = "potentialFoam"
+type = "analytical"
+
+[geometry]
+domain_min = [0.0, 0.0, -0.5]
+domain_max = [2.0, 1.0, 0.5]
+cells_per_axis = [40, 10, 1]
+
+[boundary_conditions]
+inlet = "fixedValue (1, 0, 0)"
+outlet = "zeroGradient"
+wall_bottom = "symmetryPlane"
+wall_top = "symmetryPlane"
+frontAndBack = "empty"
+
+[analytical_solution]
+U_exact = "(1.0, 0.0, 0.0) everywhere"
+Phi_exact = "x + C (gauge: Phi(0) = 0 at inlet centreline)"
+notes = "For uniform flow in a straight channel with no obstacles, the potential flow solution is trivially U = U_inlet everywhere and Phi = U0*x + C."

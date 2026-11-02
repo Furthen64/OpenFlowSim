@@ -1,0 +1,17 @@
+# Case metadata for validation harness.
+
+[case]
+name = "pitzDaily"
+description = "Backward-facing step — classic turbulence/potential-flow benchmark."
+solver = "potentialFoam"
+type = "regression"
+
+[geometry]
+notes = "Standard pitzGeometry from OpenFOAM tutorials. Requires decomposePar or external mesh."
+
+[boundary_conditions]
+inlet = "fixedValue (10, 0, 0)"
+outlet = "zeroGradient"
+upperWall = "noSlip"
+lowerWall = "noSlip"
+frontAndBack = "empty"

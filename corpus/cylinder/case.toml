@@ -1,0 +1,19 @@
+# Case metadata for validation harness.
+
+[case]
+name = "cylinder"
+description = "Potential flow around a circular cylinder (2D symmetry)."
+solver = "potentialFoam"
+type = "regression"
+
+[geometry]
+domain_min = [-2.0, 0.0, -0.5]
+domain_max = [2.0, 2.0, 0.5]
+notes = "Quarter-cylinder with symmetry planes on down and up; periodic in z via empty BCs."
+
+[boundary_conditions]
+left = "fixedValue (1, 0, 0)"
+right = "zeroGradient"
+down = "symmetryPlane"
+up = "symmetryPlane"
+cylinder = "symmetry"
