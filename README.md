@@ -3,8 +3,9 @@
 OpenFlowSim is a work in progress to implement OpenFOAM 14's `potentialFoam`
 solver in Rust and validate its results against OpenFOAM and analytical cases.
 The repository currently contains the OpenFOAM solver reference, case inputs,
-one generated reference dataset, and a Rust validation tool. **The Rust solver
-has not been implemented yet.**
+one generated reference dataset, and a Rust validation tool. 
+
+**The Rust solver has not been implemented yet.**
 
 ## Project status
 
