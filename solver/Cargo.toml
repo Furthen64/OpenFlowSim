@@ -1,0 +1,11 @@
+[package]
+name = "foamcore-solver"
+description = "Rust implementation of OpenFOAM potentialFoam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+thiserror.workspace = true
+toml.workspace = true

@@ -1,7 +1,7 @@
 # OpenFlowSim validation harness
 
-This crate validates OpenFOAM field files and will be used to check a Rust
-implementation of `potentialFoam`. It does not contain the Rust flow solver.
+This crate validates OpenFOAM field files and checks the Rust `potentialFoam`
+implementation. The solver itself lives in the workspace's `solver/` crate.
 
 ## Commands
 

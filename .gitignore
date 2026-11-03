@@ -5,6 +5,7 @@ results/
 validation/reports/*.json
 validation/reports/*.md
 validation/reports/*.html
+validation/runs/
 
 # Reference data IS committed (small deterministic baselines)
 !reference/
