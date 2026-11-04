@@ -175,6 +175,7 @@ name = "foamcore-icofoam"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "foamcore-solver",
  "thiserror",
 ]
 

@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 clap.workspace = true
 thiserror.workspace = true
+foamcore-solver = { path = "../solver" }
