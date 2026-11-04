@@ -1,5 +1,7 @@
 # Generated solver outputs — never commit
 results/
+workspaces/
+steposcope/
 
 # Validation reports (generated artifacts)
 validation/reports/*.json
@@ -34,28 +36,3 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
-
-# Existing OpenFlowSim ignore rules
-# Generated solver outputs — never commit
-results/
-
-# Validation reports (generated artifacts)
-validation/reports/*.json
-validation/reports/*.md
-validation/reports/*.html
-
-# Reference data IS committed (small deterministic baselines)
-!reference/
-
-# Rust build artifacts
-target/
-
-# OpenFOAM run-time scratch
-*.log
-processor*/
-postProcess/
-
-# OS/editor noise
-.DS_Store
-*.swp
-*~

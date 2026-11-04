@@ -1,104 +1,117 @@
 # OpenFlowSim
 
-OpenFlowSim is a work in progress to implement OpenFOAM 14's `potentialFoam`
-solver in Rust and validate its results against OpenFOAM and analytical cases.
-The repository currently contains the OpenFOAM solver reference, case inputs,
-one generated reference dataset, and a Rust validation tool. 
-
-**The Rust solver has not been implemented yet.**
+OpenFlowSim is a Rust implementation of the potential-flow solver workflow
+represented by OpenFOAM's `potentialFoam`. The project currently focuses on
+one runnable solver and one supported starter case, `simpleChannel`. The
+OpenFOAM source is kept as a reference; OpenFOAM itself is not required to run
+the Rust solver.
 
 ## Project status
 
-### Done
+### Current scope
 
-- Added the OpenFOAM 14 `potentialFoam` source and supporting headers under
-  [`potentialFoam/`](potentialFoam/).
-- Added three case setups: `simpleChannel`, `cylinder`, and `pitzDaily` under
-  [`corpus/`](corpus/).
-- Generated OpenFOAM reference fields (`U`, `phi`, and `Phi`) and provenance
-  metadata for `simpleChannel` under [`reference/simpleChannel/`](reference/simpleChannel/).
-- Built the Rust `foamcore-validation` crate. It parses OpenFOAM scalar and
-  vector internal fields, compares fields with tolerances, checks reference
-  provenance, and writes JSON and Markdown reports.
-- Added a uniform-channel analytical check for `U` and `Phi`.
-- Verified the harness with 33 passing Rust tests. The analytical check passes
-  against the stored OpenFOAM simple-channel result.
+The project has one solver target: potential flow on finite-volume meshes,
+based on OpenFOAM's `potentialFoam`. The reusable boilerplate lives in
+`templates/potentialFoam/`; each scenario made from it gets a local workspace
+under `workspaces/`. `simpleChannel` is the first scenario. `cylinder` and
+`pitzDaily` are legacy inputs and are not part of the new workspace workflow.
 
-### In progress / not done
+The current Rust solver still runs from `corpus/simpleChannel` and builds a 2D
+structured channel mesh from its `case.toml` when no mesh is supplied, or reads
+an ASCII OpenFOAM `constant/polyMesh`. It solves for `Phi`, reconstructs `U`,
+and writes `U`, `phi`, and `Phi`. The numerical path is limited to orthogonal
+meshes and the boundary conditions used by the channel case. The new template
+is the clean target format; wiring the solver to run directly from a workspace
+is the next step.
 
-- The first runnable Rust `potentialFoam` path is implemented for orthogonal
-  meshes and the `simpleChannel` case. It solves for `Phi`, reconstructs `U`,
-  and writes `U`, `phi`, and `Phi`. General non-orthogonal correction, broader
-  boundary conditions, and pressure output remain future work.
-- Only `simpleChannel` currently has generated OpenFOAM reference fields.
-- `cylinder` and `pitzDaily` are case inputs, but they do not yet have usable
-  solver results and reference data in this repository.
-- `compare-all` writes separate per-case reports. It does not yet produce one
-  combined report.
+### Mesh and case layout
 
-### Corpus validation pipeline
+The intended project layout separates reusable boilerplate from local runs:
 
-`validate_corpus.sh` runs supported cases end to end: it runs the Rust solver,
-compares outputs with matching references, performs applicable analytical
-checks, and writes aggregate JSON and Markdown reports under a unique
-`validation/runs/<run-id>/` directory. Unsupported cases and cases without
-matching references are recorded as skipped with a reason. The command returns
-failure if any executed case fails; `genreport.sh` can render a run's reports
-as HTML.
+```text
+templates/potentialFoam/     versioned solver and scenario boilerplate
+  channel/scenario.toml      starter geometry, mesh, and flow settings
+workspaces/                  local scenarios and run artifacts (git-ignored)
+reference/                   checked-in comparison data
+corpus/                      legacy inputs retained during migration
+```
 
-### Planned: Rust `potentialFoam` solver
+New scenarios should start by copying a template into `workspaces/`. Keep
+geometry inputs such as STEP files, generated meshes, settings, and outputs
+inside that workspace. Only reusable defaults belong in `templates/`. The
+template currently documents the intended format; it is not yet runnable
+because the solver still expects the legacy OpenFOAM-style velocity field.
 
-Use [`potentialFoam/potentialFoam.C`](potentialFoam/potentialFoam.C) and its
-included field/control files as the behavioral reference. Build the solver in
-small stages, beginning with the existing `simpleChannel` case and expanding
-to general OpenFOAM meshes and boundary conditions after the basic numerical
-path is validated.
+Launch the desktop STEP setup app with:
 
-- [x] **Define the first executable contract.** Add a Rust solver binary with
-  `run <case>` that reads `U`, writes OpenFOAM fields in a results time
-  directory, and returns a failing exit code on invalid input or a failed
-  solve. Optional pressure output and broader OpenFOAM command-line
-  compatibility remain deferred.
-- [ ] **Represent and load meshes.** Define mesh cells, faces, owner/neighbour
-  addressing, face area vectors, cell centres and volumes, and boundary
-  patches. Read OpenFOAM `polyMesh` files and validate their addressing and
-  geometry. First exercise this on a generated `simpleChannel` mesh; then add
-  non-orthogonal mesh support needed by the other cases.
-- [ ] **Read and write fields.** Parse the required scalar and vector volume
-  fields, dimensions, internal values, patch types, and patch values. Preserve
-  or correctly emit OpenFOAM field syntax so solver output can be read by
-  OpenFOAM and the existing Rust validation crate. Add focused round-trip and
-  malformed-input tests.
-- [ ] **Implement boundary and flux setup.** Support the initial velocity
-  boundary conditions used by `simpleChannel`, infer potential boundary
-  conditions from pressure boundary conditions as in `createFields.H`, form
-  face fluxes from velocity, and enforce net boundary flux consistency.
-- [ ] **Assemble and solve the potential equation.** Implement finite-volume
-  divergence and Laplacian operators, reference-cell handling for the
-  arbitrary potential gauge, linear-system assembly/solve, and
-  non-orthogonal correction loops. Check conservation, residuals, and
-  flux-correction sign conventions against the bundled OpenFOAM source.
-- [ ] **Correct flux and reconstruct velocity.** Apply the solved potential's
-  face-flux correction, reconstruct cell velocity from face fluxes, enforce
-  velocity boundary conditions, and report continuity and interpolation
-  errors.
-- [ ] **Validate the MVP end to end.** Run `simpleChannel`; check its uniform
-  analytical velocity and potential (up to gauge), compare `U`, `phi`, and
-  `Phi` with the stored OpenFOAM reference, and run the planned corpus pipeline.
-  Keep each numerical operator covered by small deterministic unit tests.
-- [ ] **Expand case and feature coverage.** Add robust non-orthogonal and
-  boundary-condition support, then validate `cylinder`. Make the missing mesh
-  and reference requirements for `pitzDaily` explicit before claiming it as
-  covered. Consider optional approximate pressure (`-writep`), rotating-frame
-  zones, and broader OpenFOAM compatibility only after the core solver passes
-  its regression cases.
+```sh
+./openflowsim-gui.sh
+```
+
+The app opens to a welcome screen with recent workspaces and a **New
+Workspace** flow. Choose an empty folder to use it directly as the workspace,
+or choose `./workspaces/` to enter a name and create a workspace subfolder.
+Nonempty folders outside the default workspace root are rejected. In the setup
+window, import a STEP scene using the
+copied Steposcope parser and geometry builder, then use the VTK viewport to
+orbit, pan, zoom, and select geometry. Select a face and assign a boundary
+with Enter, or use I/O/W for inlet/outlet/wall. Right-click an aperture edge
+to detect its closed planar STEP edge loop and preview a translucent virtual
+cap; assign the cap as inlet or outlet. Use **1 / 2 / 3 / 4** to switch
+vertex, edge, face, or solid selection modes; the active mode is shown in the
+bottom status area. Press **F** to focus and frame the selected component. The
+app auto-fits an editable domain
+box around the scene. **Save Workspace** writes a `workspace.ofs` file and a
+200 x 100 PNG preview in the workspace folder; the welcome screen lists saved
+workspaces and opens them again. Vertical mouse movement while orbiting is
+inverted. Importing geometry, changing domain bounds, or assigning a boundary
+marks the workspace as modified; closing it offers Save, Discard, or Cancel.
+
+### Planned STEP-to-OFS workflow
+
+The first complete product milestone is converting a FreeCAD STEP scene into
+an OpenFlowSim `.ofs` setup. OpenFlowSim will remain a standalone desktop app
+and will house its own Rust potential-flow solver.
+
+1. Build a scene in FreeCAD and export it as STEP (AP203).
+2. Open the STEP file in the OpenFlowSim desktop app.
+3. Automatically fit a flow-domain bounding box around the imported scene.
+4. Select geometry faces in the viewer and assign named boundary roles. Face
+   selection should be available through a context menu and/or keyboard
+   shortcut.
+5. Save a sibling `.ofs` file next to the STEP file. The `.ofs` references the
+   STEP path and stores its SHA-256 hash, the domain bounds, named face
+   assignments, `.ofs` schema version, and OpenFlowSim writer version.
+6. If the STEP file's hash changes, mark its sibling `.ofs` as invalid. The
+   user must reopen the geometry and assign faces again before using the
+   project.
+
+The first milestone ends when STEP import, domain fitting, face assignment,
+and `.ofs` save/load work. Next, connect the project to an external mesher and
+then to the Rust solver. The external mesher is an explicit design choice; the
+specific mesher and its mesh format remain open until solver mesh requirements
+are clearer. The Rust solver will likely need further development to consume
+those meshes and boundary assignments.
+
+### Next steps
+
+1. Define and implement the standalone STEP-to-OFS desktop workflow above.
+2. Select an external mesher and define how `.ofs` named boundaries map to its
+   mesh regions.
+3. Extend the Rust solver to consume the selected mesh and boundary data.
+4. Add another scenario only when the same solver workflow can run and validate
+   it.
 
 ## Repository layout
 
 | Path | Purpose |
 | --- | --- |
-| `potentialFoam/` | OpenFOAM 14 C++ solver source used as the implementation reference |
-| `corpus/` | OpenFOAM case inputs and metadata |
+| `templates/potentialFoam/` | Reusable scenario boilerplate for the Rust solver |
+| `workspaces/` | Local, Git-ignored scenario inputs, meshes, and run artifacts |
+| `tools/ofs_gui.py` | Python STEP viewer and boundary setup desktop app |
+| `tools/step_viewer/vendor/step_explorer/` | Copied STEP parser, tessellator, and VTK viewer modules |
+| `corpus/` | Legacy OpenFOAM case inputs retained during migration |
+| `potentialFoam/` | OpenFOAM source used as the implementation reference |
 | `reference/` | Stored OpenFOAM output fields and provenance |
 | `results/` | Location for future Rust solver output (ignored by Git) |
 | `solver/` | Rust `potentialFoam` implementation (in progress) |
