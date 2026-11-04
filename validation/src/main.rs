@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use foamcore_validation::compare::{compare_fields, gauge_align, Tolerance};
+use foamcore_validation::compare::{compare_fields, compare_fields_rel_l2, gauge_align, Tolerance};
 use foamcore_validation::field::{self, Field, FieldType};
 use foamcore_validation::provenance::{directory_checksum, Provenance};
 use foamcore_validation::report::{CaseReport, ComparisonEntry, TestStatus, ValidationReport};
@@ -33,6 +33,12 @@ enum Commands {
         /// Output report path
         #[arg(long, default_value = "validation/reports/report.json")]
         report: PathBuf,
+        /// Directory for generated SVG field plots
+        #[arg(long)]
+        plots_dir: Option<PathBuf>,
+        /// OpenFOAM case containing constant/polyMesh (required with --plots-dir)
+        #[arg(long)]
+        mesh_case: Option<PathBuf>,
     },
     /// Run all available comparison cases
     CompareAll {
@@ -55,6 +61,24 @@ enum Commands {
         results_dir: PathBuf,
         #[arg(long, default_value = "validation/reports/analytical.json")]
         report: PathBuf,
+    },
+    /// Check backward-facing-step separation and streamwise profiles
+    StepDiagnostics {
+        /// Results directory containing backwardFacingStep/<time>/U
+        #[arg(long, default_value = "results")]
+        results_dir: PathBuf,
+        /// Reference directory containing backwardFacingStep/<time>/U
+        #[arg(long, default_value = "reference")]
+        ref_dir: PathBuf,
+        /// Case directory containing constant/polyMesh
+        #[arg(long)]
+        mesh_case: PathBuf,
+        /// CSV output for the sampled station profiles
+        #[arg(
+            long,
+            default_value = "validation/reports/backwardFacingStep_profiles.csv"
+        )]
+        output: PathBuf,
     },
     /// Generate reference data using OpenFOAM (requires OpenFOAM installation)
     GenerateReference {
@@ -81,6 +105,18 @@ enum Commands {
         /// Case name
         case: String,
     },
+    /// Export selected OpenFOAM boundary patches as a Wavefront OBJ surface mesh
+    ExportObj {
+        /// Case directory containing constant/polyMesh
+        #[arg(long)]
+        case: PathBuf,
+        /// Output OBJ file
+        #[arg(long)]
+        output: PathBuf,
+        /// Comma-separated boundary patch names (default: all patches)
+        #[arg(long, value_delimiter = ',')]
+        patches: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -93,7 +129,17 @@ fn main() -> ExitCode {
             results_dir,
             ref_dir,
             report,
-        } => cmd_compare(&case, &tolerances, &results_dir, &ref_dir, &report),
+            plots_dir,
+            mesh_case,
+        } => cmd_compare(
+            &case,
+            &tolerances,
+            &results_dir,
+            &ref_dir,
+            &report,
+            plots_dir.as_deref(),
+            mesh_case.as_deref(),
+        ),
 
         Commands::CompareAll {
             tolerances,
@@ -108,6 +154,13 @@ fn main() -> ExitCode {
             report,
         } => cmd_analytical(&case, &results_dir, &report),
 
+        Commands::StepDiagnostics {
+            results_dir,
+            ref_dir,
+            mesh_case,
+            output,
+        } => cmd_step_diagnostics(&results_dir, &ref_dir, &mesh_case, &output),
+
         Commands::GenerateReference {
             case,
             corpus_dir,
@@ -117,6 +170,12 @@ fn main() -> ExitCode {
         } => cmd_generate_reference(&case, &corpus_dir, &ref_dir, force, openfoam_env.as_deref()),
 
         Commands::CheckProvenance { ref_dir, case } => cmd_check_provenance(&ref_dir, &case),
+
+        Commands::ExportObj {
+            case,
+            output,
+            patches,
+        } => cmd_export_obj(&case, &output, &patches),
     };
 
     match result {
@@ -126,6 +185,24 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn cmd_export_obj(
+    case: &Path,
+    output: &Path,
+    patches: &[String],
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let mesh = foamcore_solver::mesh::PolyMesh::read_case(case)?;
+    let summary = foamcore_validation::obj::write_boundary_obj(&mesh, output, patches)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+    println!(
+        "OBJ written to {} ({} vertices, {} polygons, patches: {})",
+        output.display(),
+        summary.vertex_count,
+        summary.polygon_count,
+        summary.patch_names.join(", ")
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 fn load_tolerances(path: &Path) -> Result<Tolerance, Box<dyn std::error::Error>> {
@@ -164,10 +241,7 @@ fn get_field_tolerance(toml_path: &Path, case: &str, field_name: &str) -> Tolera
                     };
                 }
                 // fields.<field>
-                if let Some(f) = val
-                    .get("fields")
-                    .and_then(|f| f.get(field_name))
-                {
+                if let Some(f) = val.get("fields").and_then(|f| f.get(field_name)) {
                     return Tolerance {
                         atol: f.get("atol").and_then(|v| v.as_float()).unwrap_or(1e-10),
                         rtol: f.get("rtol").and_then(|v| v.as_float()).unwrap_or(1e-8),
@@ -185,20 +259,33 @@ fn cmd_compare(
     results_dir: &Path,
     ref_dir: &Path,
     report_path: &Path,
+    plots_dir: Option<&Path>,
+    mesh_case: Option<&Path>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let case_ref = ref_dir.join(case);
     let case_results = results_dir.join(case);
 
     if !case_ref.exists() {
-        eprintln!("ERROR: Reference directory not found: {}", case_ref.display());
+        eprintln!(
+            "ERROR: Reference directory not found: {}",
+            case_ref.display()
+        );
         eprintln!("  Generate it with: foamcore-validate generate-reference --case {case}");
         return Ok(ExitCode::from(2));
     }
 
     if !case_results.exists() {
-        eprintln!("ERROR: Results directory not found: {}", case_results.display());
+        eprintln!(
+            "ERROR: Results directory not found: {}",
+            case_results.display()
+        );
         eprintln!("  Run the solver first to produce output.");
         return Ok(ExitCode::from(2));
+    }
+
+    if let Some(plots_dir) = plots_dir {
+        let mesh_case = mesh_case.ok_or("--mesh-case is required when --plots-dir is used")?;
+        write_case_plots(&case_results, &case_ref, mesh_case, plots_dir, case)?;
     }
 
     // Load provenance for reporting
@@ -219,6 +306,17 @@ fn cmd_compare(
         tol_path,
         case,
         FieldType::Vector,
+    ));
+
+    // Pressure is defined up to a constant unless both cases use the same
+    // reference cell, so align its gauge before comparing.
+    comparisons.push(compare_field_file(
+        "p",
+        &case_results,
+        &case_ref,
+        tol_path,
+        case,
+        FieldType::Scalar,
     ));
 
     // Compare phi field
@@ -293,21 +391,13 @@ fn compare_field_file(
     case: &str,
     ftype: FieldType,
 ) -> ComparisonEntry {
-    // Try standard OpenFOAM output locations
-    let result_candidates = [
-        results_dir.join("1").join(name),
-        results_dir.join("0").join(name),
-        results_dir.join(name),
-    ];
-    let ref_candidates = [ref_dir.join(name), ref_dir.join("1").join(name)];
-
-    let result_path = result_candidates.iter().find(|p| p.exists());
-    let ref_path = ref_candidates.iter().find(|p| p.exists());
+    let result_path = find_field_path(results_dir, name);
+    let ref_path = find_field_path(ref_dir, name);
 
     let (result_field, ref_field) = match (result_path, ref_path) {
         (Some(rp), Some(fp)) => {
-            let rf = parse_field_file(rp, name, ftype);
-            let ff = parse_field_file(fp, name, ftype);
+            let rf = parse_field_file(&rp, name, ftype);
+            let ff = parse_field_file(&fp, name, ftype);
             match (rf, ff) {
                 (Ok(r), Ok(f)) => (r, f),
                 (Err(e), _) => {
@@ -354,14 +444,22 @@ fn compare_field_file(
 
     // Gauge align Phi if configured
     let mut rf = result_field;
-    if name == "Phi" {
+    if name == "Phi" || name == "p" {
         gauge_align(&mut rf, &ref_field);
     }
 
-    match compare_fields(&rf, &ref_field, &tol) {
+    let comparison = relative_l2_target(tol_path, case, name).map_or_else(
+        || compare_fields(&rf, &ref_field, &tol),
+        |target| compare_fields_rel_l2(&rf, &ref_field, target),
+    );
+    match comparison {
         Ok(cr) => ComparisonEntry {
             field_name: name.to_string(),
-            status: if cr.passed { TestStatus::Pass } else { TestStatus::Fail },
+            status: if cr.passed {
+                TestStatus::Pass
+            } else {
+                TestStatus::Fail
+            },
             result: Some(cr),
             error_message: None,
             skip_reason: None,
@@ -376,16 +474,113 @@ fn compare_field_file(
     }
 }
 
+fn relative_l2_target(toml_path: &Path, case: &str, field_name: &str) -> Option<f64> {
+    let content = std::fs::read_to_string(toml_path).ok()?;
+    let value: toml::Value = toml::from_str(&content).ok()?;
+    value
+        .get("cases")?
+        .get(case)?
+        .get("fields")?
+        .get(field_name)?
+        .get("relative_l2")?
+        .as_float()
+}
+
+fn find_field_path(root: &Path, name: &str) -> Option<PathBuf> {
+    let mut times: Vec<(f64, PathBuf)> = std::fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let time = entry.file_name().to_string_lossy().parse::<f64>().ok()?;
+            let path = entry.path().join(name);
+            path.exists().then_some((time, path))
+        })
+        .collect();
+    times.sort_by(|a, b| a.0.total_cmp(&b.0));
+    times.pop().map(|(_, path)| path).or_else(|| {
+        [
+            root.join("1").join(name),
+            root.join("0").join(name),
+            root.join(name),
+        ]
+        .into_iter()
+        .find(|p| p.exists())
+    })
+}
+
+fn write_case_plots(
+    results_case: &Path,
+    reference_case: &Path,
+    mesh_case: &Path,
+    output_dir: &Path,
+    case: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use foamcore_solver::mesh::PolyMesh;
+
+    let mesh = PolyMesh::read_case(mesh_case)?;
+    let geometry = mesh.geometry()?;
+    std::fs::create_dir_all(output_dir)?;
+    for (name, ftype) in [("U", FieldType::Vector), ("p", FieldType::Scalar)] {
+        let result_path = find_field_path(results_case, name)
+            .ok_or_else(|| format!("missing result field {name} for plot"))?;
+        let reference_path = find_field_path(reference_case, name)
+            .ok_or_else(|| format!("missing reference field {name} for plot"))?;
+        let mut result = parse_field_file(&result_path, name, ftype)?;
+        let reference = parse_field_file(&reference_path, name, ftype)?;
+        if name == "p" {
+            gauge_align(&mut result, &reference);
+        }
+        let path = output_dir.join(format!("{case}_{name}.svg"));
+        foamcore_validation::plot::write_field_plot(&path, &reference, &result, &geometry)
+            .map_err(|e| format!("failed to plot {name}: {e}"))?;
+        println!("Field plot written to: {}", path.display());
+    }
+    if case == "cavity" {
+        let result_path = find_field_path(results_case, "U").ok_or("U field not found")?;
+        let reference_path =
+            find_field_path(reference_case, "U").ok_or("reference U field not found")?;
+        let result_u = parse_field_file(&result_path, "U", FieldType::Vector)?;
+        let reference_u = parse_field_file(&reference_path, "U", FieldType::Vector)?;
+        let report = foamcore_validation::analytical::cavity_flow_diagnostics(
+            &result_u,
+            &reference_u,
+            &geometry,
+        )
+        .map_err(|e| format!("failed to analyze cavity streamfunction: {e}"))?;
+        let result_psi =
+            foamcore_validation::analytical::cavity_streamfunction(&result_u, &geometry)
+                .map_err(|e| format!("failed to reconstruct Rust streamfunction: {e}"))?;
+        let reference_psi =
+            foamcore_validation::analytical::cavity_streamfunction(&reference_u, &geometry)
+                .map_err(|e| format!("failed to reconstruct reference streamfunction: {e}"))?;
+        let path = output_dir.join("cavity_streamfunction.svg");
+        foamcore_validation::plot::write_field_plot(&path, &reference_psi, &result_psi, &geometry)
+            .map_err(|e| format!("failed to plot cavity streamfunction: {e}"))?;
+        println!(
+            "Cavity psi rel_l2={:.3e}; primary vortex centres reference=({:.4},{:.4}) Rust=({:.4},{:.4}) distance={:.3e}; corner extrema reference={} Rust={}",
+            report.streamfunction_relative_l2,
+            report.primary_reference.x,
+            report.primary_reference.y,
+            report.primary_computed.x,
+            report.primary_computed.y,
+            report.primary_center_distance,
+            report.reference_corner_extrema,
+            report.computed_corner_extrema
+        );
+        println!("Field plot written to: {}", path.display());
+    }
+    Ok(())
+}
+
 fn parse_field_file(path: &Path, name: &str, ftype: FieldType) -> Result<Field, String> {
     match ftype {
         FieldType::Scalar => {
-            let values = field::parse_openfoam_scalar_internal(path)
-                .map_err(|e| e.to_string())?;
+            let values = field::parse_openfoam_scalar_internal(path).map_err(|e| e.to_string())?;
             Ok(Field::scalar(name, values))
         }
         FieldType::Vector => {
-            let (x, y, z) = field::parse_openfoam_vector_internal(path)
-                .map_err(|e| e.to_string())?;
+            let (x, y, z) =
+                field::parse_openfoam_vector_internal(path).map_err(|e| e.to_string())?;
             Ok(Field::vector(name, x, y, z))
         }
     }
@@ -412,14 +607,26 @@ fn cmd_compare_all(
         return Ok(ExitCode::from(2));
     }
 
-    println!("Running comparisons for {} case(s): {}\n", cases.len(), cases.join(", "));
+    println!(
+        "Running comparisons for {} case(s): {}\n",
+        cases.len(),
+        cases.join(", ")
+    );
 
     let mut reports = Vec::new();
     let mut any_failed = false;
 
     for case in &cases {
         print!("  {}: ", case);
-        let code = cmd_compare(case, tol_path, results_dir, ref_dir, &report_path.with_file_name(format!("{case}.json")));
+        let code = cmd_compare(
+            case,
+            tol_path,
+            results_dir,
+            ref_dir,
+            &report_path.with_file_name(format!("{case}.json")),
+            None,
+            None,
+        );
         match code {
             Ok(c) => {
                 if c == ExitCode::SUCCESS {
@@ -443,7 +650,11 @@ fn cmd_compare_all(
             reference_source: "see individual reports".into(),
             timestamp: String::new(),
             comparisons: vec![],
-            overall_status: if any_failed { TestStatus::Fail } else { TestStatus::Pass },
+            overall_status: if any_failed {
+                TestStatus::Fail
+            } else {
+                TestStatus::Pass
+            },
             performance: None,
             summary: String::new(),
         });
@@ -466,8 +677,38 @@ fn cmd_analytical(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     use foamcore_validation::analytical::UniformChannelAnalytical;
 
+    if case == "pipeFlow" {
+        let case_results = results_dir.join(case);
+        let u_path = find_field_path(&case_results, "U").ok_or("U field not found in results")?;
+        let (ux, uy, uz) = field::parse_openfoam_vector_internal(&u_path)
+            .map_err(|e| format!("Failed to parse U: {e}"))?;
+        let computed_u = Field::vector("U", ux, uy, uz);
+        let mesh =
+            foamcore_solver::mesh::PolyMesh::read_case(Path::new("icoFoamRust/cases/pipeFlow"))?;
+        let geometry = mesh.geometry()?;
+        let result = foamcore_validation::analytical::verify_poiseuille_outlet(
+            &computed_u,
+            &geometry,
+            1.0,
+            1.0,
+            1.5,
+            0.02,
+        )?;
+        println!("{result}");
+        if let Some(parent) = report_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(report_path, serde_json::to_string_pretty(&result)?)?;
+        println!("\nReport: {}", report_path.display());
+        return Ok(if result.passed {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        });
+    }
+
     if case != "simpleChannel" {
-        eprintln!("ERROR: Analytical verification currently only supports 'simpleChannel'");
+        eprintln!("ERROR: Analytical verification supports 'simpleChannel' and 'pipeFlow'");
         return Ok(ExitCode::from(2));
     }
 
@@ -499,7 +740,10 @@ fn cmd_analytical(
     // Load computed results
     let case_results = results_dir.join(case);
     if !case_results.exists() {
-        eprintln!("ERROR: No solver results found at {}", case_results.display());
+        eprintln!(
+            "ERROR: No solver results found at {}",
+            case_results.display()
+        );
         eprintln!("  Run the Rust solver first.");
         return Ok(ExitCode::from(2));
     }
@@ -535,8 +779,14 @@ fn cmd_analytical(
 
     // The analytical case is also run against OpenFOAM output, whose iterative
     // solve leaves residuals around 1e-7 for this mesh and solver tolerance.
-    let tol_u = Tolerance { atol: 1e-6, rtol: 1e-6 };
-    let tol_p = Tolerance { atol: 1e-6, rtol: 1e-6 };
+    let tol_u = Tolerance {
+        atol: 1e-6,
+        rtol: 1e-6,
+    };
+    let tol_p = Tolerance {
+        atol: 1e-6,
+        rtol: 1e-6,
+    };
 
     let report = analytical.verify(&computed_u, computed_phi.as_ref(), &tol_u, &tol_p);
     println!("{report}");
@@ -554,6 +804,64 @@ fn cmd_analytical(
     } else {
         Ok(ExitCode::from(1))
     }
+}
+
+fn cmd_step_diagnostics(
+    results_dir: &Path,
+    ref_dir: &Path,
+    mesh_case: &Path,
+    output: &Path,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use foamcore_solver::mesh::PolyMesh;
+    use foamcore_validation::analytical::backward_facing_step_diagnostics;
+
+    let case_results = results_dir.join("backwardFacingStep");
+    let case_reference = ref_dir.join("backwardFacingStep");
+    let result_path = find_field_path(&case_results, "U").ok_or("result U field not found")?;
+    let reference_path =
+        find_field_path(&case_reference, "U").ok_or("reference U field not found")?;
+    let computed_u = parse_field_file(&result_path, "U", FieldType::Vector)?;
+    let reference_u = parse_field_file(&reference_path, "U", FieldType::Vector)?;
+    let mesh = PolyMesh::read_case(mesh_case)?;
+    let geometry = mesh.geometry()?;
+    let report = backward_facing_step_diagnostics(
+        &computed_u,
+        &reference_u,
+        &geometry,
+        0.0,
+        &[0.05, 0.10, 0.20],
+    )?;
+    println!(
+        "Near-wall reverse flow: OpenFOAM separation x={:?}, reattachment x={:?}; Rust separation x={:?}, reattachment x={:?}",
+        report.reference.separation_x,
+        report.reference.reattachment_x,
+        report.computed.separation_x,
+        report.computed.reattachment_x
+    );
+    let mut csv = String::from("requested_x,sampled_x,y,openfoam_Ux,rust_Ux,abs_error\n");
+    for profile in &report.computed.profiles {
+        println!(
+            "Profile x={:.4} (sampled {:.4}): rel_l2={:.4e}, max_abs={:.4e}",
+            profile.requested_x, profile.sampled_x, profile.relative_l2, profile.max_abs_error
+        );
+        for i in 0..profile.y.len() {
+            csv.push_str(&format!(
+                "{:.9},{:.9},{:.9},{:.12e},{:.12e},{:.12e}\n",
+                profile.requested_x,
+                profile.sampled_x,
+                profile.y[i],
+                profile.reference_ux[i],
+                profile.computed_ux[i],
+                (profile.reference_ux[i] - profile.computed_ux[i]).abs()
+            ));
+        }
+    }
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(output, csv)?;
+    println!("Profile CSV written to: {}", output.display());
+    Ok(ExitCode::SUCCESS)
 }
 
 fn cmd_generate_reference(
@@ -587,7 +895,10 @@ fn cmd_generate_reference(
         .ok_or("OpenFOAM environment script not found. Use --openfoam-env to specify.")?;
 
     if !env_script.exists() {
-        eprintln!("ERROR: OpenFOAM environment script not found: {}", env_script.display());
+        eprintln!(
+            "ERROR: OpenFOAM environment script not found: {}",
+            env_script.display()
+        );
         eprintln!("  Cannot generate reference without OpenFOAM installed.");
         return Ok(ExitCode::from(2));
     }
@@ -629,7 +940,10 @@ fn cmd_generate_reference(
             .arg(&run_cmd)
             .output()?;
         if !output.status.success() {
-            eprintln!("ERROR: blockMesh failed:\n{}", String::from_utf8_lossy(&output.stderr));
+            eprintln!(
+                "ERROR: blockMesh failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             std::fs::remove_dir_all(&work_dir)?;
             return Ok(ExitCode::from(2));
         }
@@ -655,7 +969,10 @@ fn cmd_generate_reference(
     let elapsed = start.elapsed().as_secs_f64();
 
     if !output.status.success() {
-        eprintln!("ERROR: potentialFoam failed:\n{}", String::from_utf8_lossy(&output.stderr));
+        eprintln!(
+            "ERROR: potentialFoam failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         std::fs::remove_dir_all(&work_dir)?;
         return Ok(ExitCode::from(2));
     }
@@ -747,7 +1064,10 @@ fn cmd_generate_reference(
     Ok(ExitCode::SUCCESS)
 }
 
-fn cmd_check_provenance(ref_dir: &Path, case: &str) -> Result<ExitCode, Box<dyn std::error::Error>> {
+fn cmd_check_provenance(
+    ref_dir: &Path,
+    case: &str,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let prov_path = ref_dir.join(case).join("provenance.toml");
     if !prov_path.exists() {
         eprintln!("ERROR: No provenance found at {}", prov_path.display());
@@ -756,8 +1076,18 @@ fn cmd_check_provenance(ref_dir: &Path, case: &str) -> Result<ExitCode, Box<dyn 
 
     let prov = Provenance::read(&prov_path)?;
     println!("Provenance for '{}':", case);
-    println!("  Solver:       {} v{} ({})", prov.solver, prov.version, prov.distribution);
-    println!("  Commit:       {}", if prov.commit.is_empty() { "unknown" } else { &prov.commit });
+    println!(
+        "  Solver:       {} v{} ({})",
+        prov.solver, prov.version, prov.distribution
+    );
+    println!(
+        "  Commit:       {}",
+        if prov.commit.is_empty() {
+            "unknown"
+        } else {
+            &prov.commit
+        }
+    );
     println!("  Dirty tree:   {}", prov.dirty_tree);
     println!("  Precision:    {}", prov.precision);
     println!("  Platform:     {}", prov.platform);
@@ -774,19 +1104,57 @@ fn cmd_check_provenance(ref_dir: &Path, case: &str) -> Result<ExitCode, Box<dyn 
         println!("  Run time:     {:.2}s", t);
     }
 
-    // Verify input checksum still matches corpus
+    // Verify the recorded input against the case source used in this repo.
     if let Some(hash) = &prov.input_checksum {
-        let corpus_case = Path::new("corpus").join(case);
-        if corpus_case.exists() {
-            let current_hash = directory_checksum(&corpus_case).unwrap_or_default();
+        let source_case = [
+            PathBuf::from("corpus").join(case),
+            PathBuf::from("icoFoamRust/cases").join(case),
+        ]
+        .into_iter()
+        .find(|path| path.exists());
+        if let Some(source_case) = source_case {
+            let current_hash = directory_checksum(&source_case).unwrap_or_default();
             if current_hash != *hash {
                 eprintln!("\nWARNING: Input case has been modified since reference was generated!");
+                eprintln!("  Source:   {}", source_case.display());
                 eprintln!("  Recorded: {hash}");
                 eprintln!("  Current:  {current_hash}");
                 return Ok(ExitCode::from(1));
             } else {
-                println!("\n  Input checksum verified OK.");
+                println!(
+                    "\n  Input checksum verified OK against {}.",
+                    source_case.display()
+                );
             }
+        } else {
+            println!("\n  Input checksum not verified: no source case directory found.");
+        }
+    }
+
+    if let Some(hash) = &prov.mesh_checksum {
+        let mesh_source = [
+            PathBuf::from("corpus").join(case),
+            PathBuf::from("icoFoamRust/cases").join(case),
+        ]
+        .into_iter()
+        .map(|path| path.join("constant").join("polyMesh"))
+        .find(|path| path.exists());
+        if let Some(mesh_source) = mesh_source {
+            let current_hash = directory_checksum(&mesh_source).unwrap_or_default();
+            if current_hash != *hash {
+                eprintln!("\nWARNING: Mesh has been modified since reference was generated!");
+                eprintln!("  Source:   {}", mesh_source.display());
+                eprintln!("  Recorded: {hash}");
+                eprintln!("  Current:  {current_hash}");
+                return Ok(ExitCode::from(1));
+            } else {
+                println!(
+                    "  Mesh checksum verified OK against {}.",
+                    mesh_source.display()
+                );
+            }
+        } else {
+            println!("  Mesh checksum not verified: no source mesh directory found.");
         }
     }
 

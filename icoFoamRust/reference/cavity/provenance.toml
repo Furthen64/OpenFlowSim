@@ -1,0 +1,14 @@
+format_version = 1
+solver = "icoFoam"
+distribution = "OpenFOAM Foundation"
+version = "14"
+commit = "f629b20d37bd1eb622ed468e24192ecc2cc1e5a1"
+dirty_tree = true
+precision = "float64"
+platform = "linux64GccDPInt32Opt"
+compiler = "GCC (DPInt32Opt)"
+case_name = "cavity"
+input_checksum = "c507e1c4e2c71256b4c5b4b0f16ae5c34dc9a0e778ebd08e2e54a8b86576f84f"
+mesh_checksum = "70ddb002535680f54f5b4d06b5df221a809dff3286f2ce87fe4bd9334bdf63e9"
+generated_at = "2026-11-04T19:39:52Z"
+execution_time_s = 0.79

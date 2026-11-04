@@ -376,17 +376,13 @@ fn read_labels(path: &Path) -> Result<Vec<usize>, MeshReadError> {
 fn read_boundary(path: &Path) -> Result<Vec<BoundaryPatch>, MeshReadError> {
     let tokens = read_tokens(path)?;
     let count_i = tokens
-        .iter()
-        .position(|token| token.parse::<usize>().is_ok())
+        .windows(2)
+        .position(|pair| pair[0].parse::<usize>().is_ok() && pair[1] == "(")
         .ok_or_else(|| invalid(path, "missing boundary patch count"))?;
     let count = tokens[count_i]
         .parse::<usize>()
         .map_err(|_| invalid(path, "invalid patch count"))?;
-    let open_i = tokens[count_i + 1..]
-        .iter()
-        .position(|token| token == "(")
-        .map(|i| count_i + 1 + i)
-        .ok_or_else(|| invalid(path, "missing boundary list opening parenthesis"))?;
+    let open_i = count_i + 1;
     let mut cursor = open_i + 1;
     let mut patches = Vec::new();
     while cursor < tokens.len() && tokens[cursor] != ")" {
@@ -456,17 +452,13 @@ fn read_boundary(path: &Path) -> Result<Vec<BoundaryPatch>, MeshReadError> {
 fn read_list_tokens(path: &Path) -> Result<(usize, Vec<String>), MeshReadError> {
     let tokens = read_tokens(path)?;
     let count_i = tokens
-        .iter()
-        .position(|token| token.parse::<usize>().is_ok())
+        .windows(2)
+        .position(|pair| pair[0].parse::<usize>().is_ok() && pair[1] == "(")
         .ok_or_else(|| invalid(path, "missing list length"))?;
     let count = tokens[count_i]
         .parse::<usize>()
         .map_err(|_| invalid(path, "invalid list length"))?;
-    let open_i = tokens[count_i + 1..]
-        .iter()
-        .position(|token| token == "(")
-        .map(|i| count_i + 1 + i)
-        .ok_or_else(|| invalid(path, "missing list opening parenthesis"))?;
+    let open_i = count_i + 1;
     let mut depth = 0usize;
     let mut close_i = None;
     for (i, token) in tokens.iter().enumerate().skip(open_i) {
