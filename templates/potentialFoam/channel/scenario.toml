@@ -1,0 +1,27 @@
+# Starter scenario for the Rust potential-flow solver.
+# This is the intended workspace configuration format; solver support is next.
+
+[scenario]
+name = "channel"
+description = "Uniform potential flow through a straight rectangular channel."
+
+[solver]
+name = "potentialFoam"
+
+[domain]
+min = [0.0, 0.0, -0.5]
+max = [2.0, 1.0, 0.5]
+
+[mesh]
+type = "structured"
+cells = [40, 10, 1]
+
+[flow]
+inlet_velocity = [1.0, 0.0, 0.0]
+
+[boundaries]
+inlet = "fixed_velocity"
+outlet = "zero_gradient"
+bottom = "symmetry"
+top = "symmetry"
+front_and_back = "empty"

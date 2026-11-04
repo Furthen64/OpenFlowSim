@@ -2,4 +2,8 @@
 name = "openflowsim"
 version = "0.1.0"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "numpy>=2.5.3",
+    "PySide6-Essentials>=6.7",
+    "vtk>=9.3",
+]
