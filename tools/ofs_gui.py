@@ -459,17 +459,19 @@ class OpenFlowWindow(QMainWindow):
                 "The STEP file no longer matches this workspace. Saved face assignments were discarded; please select them again.",
             )
             return
+        snapshot_face_ids = {face.entity_id for face in self.snapshot.faces}
         invalid_faces = [int(key) for key in payload["face_roles"]
-                         if int(key) > 0 and not self.viewport.has_rendered_face(int(key))]
+                         if int(key) > 0 and int(key) not in snapshot_face_ids]
         if invalid_faces:
             raise ValueError(
                 "Workspace boundary assignments reference faces that are absent from the STEP scene: "
                 + ", ".join(f"#{entity_id}" for entity_id in invalid_faces[:8])
             )
-        invalid_openings = [
-            assignment_id for assignment_id, record in payload["opening_assignments"].items()
-            if not self.viewport.has_rendered_edge(record["edge_id"])
-        ]
+        invalid_openings = []
+        for assignment_id, record in payload["opening_assignments"].items():
+            edge = self.document.entity(record["edge_id"])
+            if edge is None or edge.type_name.upper() not in {"EDGE_CURVE", "ORIENTED_EDGE"}:
+                invalid_openings.append(assignment_id)
         if invalid_openings:
             raise ValueError(
                 "Workspace opening assignments reference edges that are absent from the STEP scene: "
