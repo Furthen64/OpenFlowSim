@@ -1,0 +1,10 @@
+[package]
+name = "foamcore-icofoam"
+description = "Rust implementation of OpenFOAM icoFoam (transient incompressible laminar NS)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap.workspace = true
+thiserror.workspace = true
