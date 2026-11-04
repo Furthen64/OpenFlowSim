@@ -54,18 +54,25 @@ or choose `./workspaces/` to enter a name and create a workspace subfolder.
 Nonempty folders outside the default workspace root are rejected. In the setup
 window, import a STEP scene using the
 copied Steposcope parser and geometry builder, then use the VTK viewport to
-orbit, pan, zoom, and select geometry. Select a face and assign a boundary
+orbit, pan, zoom, and select geometry. Choose CAD Shaded, Clay, Glass,
+Technical, or Face Orientation from the material selector to change how the
+shape is displayed. Select a face and assign a boundary
 with Enter, or use I/O/W for inlet/outlet/wall. Right-click an aperture edge
 to detect its closed planar STEP edge loop and preview a translucent virtual
 cap; assign the cap as inlet or outlet. Use **1 / 2 / 3 / 4** to switch
 vertex, edge, face, or solid selection modes; the active mode is shown in the
 bottom status area. Press **F** to focus and frame the selected component. The
-app auto-fits an editable domain
+app uses screen-space proximity to select the edge closest to the cursor.
+Shift-click edges to build a multi-edge selection; matching a closed planar
+STEP loop creates a virtual opening cap for inlet/outlet assignment. The app
+auto-fits an editable domain
 box around the scene. **Save Workspace** writes a `workspace.ofs` file and a
 200 x 100 PNG preview in the workspace folder; the welcome screen lists saved
 workspaces and opens them again. Vertical mouse movement while orbiting is
 inverted. Importing geometry, changing domain bounds, or assigning a boundary
 marks the workspace as modified; closing it offers Save, Discard, or Cancel.
+Assigned boundaries appear as individual rows: click a row to focus its face or
+opening edge, or click **×** to remove that assignment.
 
 ### Planned STEP-to-OFS workflow
 

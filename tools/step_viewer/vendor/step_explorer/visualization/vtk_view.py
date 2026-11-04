@@ -91,7 +91,7 @@ class VtkView(QWidget):
 
     orientation_warning_clicked = Signal(int, str)
     face_picked = Signal(int)
-    edge_picked = Signal(int)
+    edge_picked = Signal(int, bool)
     opening_edge_picked = Signal(int)
     vertex_picked = Signal(int)
     face_double_clicked = Signal(int)
@@ -136,9 +136,10 @@ class VtkView(QWidget):
         self.invert_mouse_vertical = bool(invert_mouse_vertical)
         self.autozoom = bool(autozoom)
         self.normal_display = "Hidden"
+        self.material_preset = "CAD Shaded"
         self.normal_arrow_limit = self.DEFAULT_NORMAL_ARROW_LIMIT
         self._normal_arrow_quotas: dict[int, int] = {}
-        self.face_color_mode = "normals"
+        self.face_color_mode = "all-the-same"
         self.max_entity_labels = self._clamp_label_limit(max_entity_labels)
         self.show_xyz_origin = bool(show_xyz_origin)
         self.show_xy_grid = bool(show_xy_grid)
@@ -158,6 +159,7 @@ class VtkView(QWidget):
         self._face_actors: dict[int, object] = {}
         self._edge_actors: dict[int, object] = {}
         self.selection_mode = "face"
+        self._selected_edge_ids: set[int] = set()
         self._selection_flash_face_id: int | None = None
         self._selection_flash_timer = QTimer(self)
         self._selection_flash_timer.setSingleShot(True)
@@ -438,7 +440,10 @@ class VtkView(QWidget):
                     elif self.selection_mode == "edge":
                         edge_id = self._pick_edge(event.position())
                         if edge_id is not None:
-                            self.edge_picked.emit(edge_id)
+                            self.edge_picked.emit(
+                                edge_id,
+                                bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier),
+                            )
                         else:
                             self.background_clicked.emit()
                     else:
@@ -479,39 +484,71 @@ class VtkView(QWidget):
         return next((entity_id for entity_id, actor in self._face_actors.items() if actor == picked), None)
 
     def _pick_edge(self, position) -> int | None:
-        if not self._edge_actors or self.renderer is None:
+        if not self._edge_actors or self.renderer is None or self._last_snapshot is None:
             return None
-        picker = vtk.vtkCellPicker()
-        picker.PickFromListOn()
-        picker.SetTolerance(0.035)
-        for actor in self._edge_actors.values():
-            picker.AddPickList(actor)
-        if not picker.Pick(position.x(), self.widget.height() - position.y() - 1, 0, self.renderer):
+        click_x, click_y = position.x(), position.y()
+
+        def project(point):
+            self.renderer.SetWorldPoint(point.x, point.y, point.z, 1.0)
+            self.renderer.WorldToDisplay()
+            x, y, depth = self.renderer.GetDisplayPoint()
+            return x, self.widget.height() - y, depth
+
+        # STEP models often render the same geometric edge through both its
+        # EDGE_CURVE and ORIENTED_EDGE. Prefer the underlying curve entities.
+        lines = [line for line in self._last_snapshot.polylines
+                 if line.entity_id in self._edge_actors and line.category == "edge"]
+        if not lines:
+            lines = [line for line in self._last_snapshot.polylines
+                     if line.entity_id in self._edge_actors]
+        best = None
+        for line in lines:
+            for first, second in zip(line.points, line.points[1:]):
+                ax, ay, az = project(first)
+                bx, by, bz = project(second)
+                dx, dy = bx - ax, by - ay
+                length2 = dx * dx + dy * dy
+                t = 0.0 if length2 <= 1e-9 else max(0.0, min(1.0, ((click_x - ax) * dx + (click_y - ay) * dy) / length2))
+                nearest_x, nearest_y = ax + t * dx, ay + t * dy
+                distance2 = (click_x - nearest_x) ** 2 + (click_y - nearest_y) ** 2
+                depth = az + t * (bz - az)
+                candidate = (distance2, depth, line.entity_id)
+                if best is None or candidate < best:
+                    best = candidate
+        if best is None or best[0] > 18.0 ** 2:
             return None
-        picked = picker.GetActor()
-        return next((entity_id for entity_id, actor in self._edge_actors.items() if actor == picked), None)
+        return best[2]
+
+    def set_edge_selection(self, entity_ids) -> None:
+        self._selected_edge_ids = set(entity_ids)
+        if self._initialized and self._last_snapshot is not None:
+            self._render_snapshot(
+                self._last_snapshot,
+                self._last_selected_id,
+                self._last_labels,
+                self._last_label_mode,
+                self._last_label_texts,
+                self._last_label_orders,
+                self._last_label_time,
+                self._last_control_net_densities,
+            )
 
     def _pick_vertex(self, position) -> int | None:
-        if not self._position_batch_actors or self._last_snapshot is None or self.renderer is None:
+        if self._last_snapshot is None or self.renderer is None:
             return None
-        picker = vtk.vtkPointPicker()
-        picker.PickFromListOn()
-        picker.SetTolerance(0.025)
-        for actor in self._position_batch_actors:
-            picker.AddPickList(actor)
-        if not picker.Pick(position.x(), self.widget.height() - position.y() - 1, 0, self.renderer):
+        if not self._last_snapshot.vertices:
             return None
-        picked = picker.GetPickPosition()
-        candidates = self._last_snapshot.vertices
-        if not candidates:
-            return None
-        return min(
-            candidates,
-            key=lambda entity_id: sum(
-                (getattr(candidates[entity_id], axis) - picked[i]) ** 2
-                for i, axis in enumerate(("x", "y", "z"))
-            ),
-        )
+        best = None
+        for entity_id, point in self._last_snapshot.vertices.items():
+            self.renderer.SetWorldPoint(point.x, point.y, point.z, 1.0)
+            self.renderer.WorldToDisplay()
+            x, y, depth = self.renderer.GetDisplayPoint()
+            y = self.widget.height() - y
+            distance2 = (position.x() - x) ** 2 + (position.y() - y) ** 2
+            candidate = (distance2, depth, entity_id)
+            if best is None or candidate < best:
+                best = candidate
+        return best[2] if best is not None and best[0] <= 16.0 ** 2 else None
 
     def has_rendered_face(self, entity_id: int | None) -> bool:
         return entity_id in self._face_actors
@@ -869,6 +906,23 @@ class VtkView(QWidget):
         if mode not in self.FACE_COLOR_MODES:
             raise ValueError(f"Unknown face color mode: {mode}")
         self.face_color_mode = mode
+        if self.renderer is not None and self._initialized and self._last_snapshot is not None:
+            self._render_snapshot(
+                self._last_snapshot,
+                self._last_selected_id,
+                self._last_labels,
+                self._last_label_mode,
+                self._last_label_texts,
+                self._last_label_orders,
+                self._last_label_time,
+            )
+
+    def set_material_preset(self, preset: str) -> None:
+        presets = {"CAD Shaded", "Clay", "Glass", "Technical", "Face Orientation"}
+        if preset not in presets:
+            raise ValueError(f"Unknown material preset: {preset}")
+        self.material_preset = preset
+        self.face_color_mode = "normals" if preset == "Face Orientation" else "all-the-same"
         if self.renderer is not None and self._initialized and self._last_snapshot is not None:
             self._render_snapshot(
                 self._last_snapshot,
@@ -1381,9 +1435,15 @@ class VtkView(QWidget):
         return tuple(component + (1.0 - component) * amount for component in color)
 
     def _face_base_colors(self, entity_id: int) -> tuple[tuple[float, float, float], tuple[float, float, float] | None]:
-        if self.face_color_mode == "normals":
+        if self.material_preset == "Face Orientation":
             return (0.2, 0.5, 1.0), (1.0, 0.25, 0.2)
-        return self._mesh_color(entity_id), None
+        palette = {
+            "CAD Shaded": (0.58, 0.72, 0.84),
+            "Clay": (0.78, 0.66, 0.51),
+            "Glass": (0.42, 0.72, 0.92),
+            "Technical": (0.78, 0.82, 0.86),
+        }
+        return palette.get(self.material_preset, self._mesh_color(entity_id)), None
 
     def _set_selected_face_brightness(self, actor, entity_id: int, amount: float) -> None:
         front, back = self._face_base_colors(entity_id)
@@ -1709,13 +1769,15 @@ class VtkView(QWidget):
         analysis_active,
         show_points=True,
     ) -> None:
-        selected = selected_id == entity_id
+        selected = selected_id == entity_id or entity_id in self._selected_edge_ids
         self._active_entity_id = entity_id
         label_text = self._label_text(entity_id, label_mode, label_texts)
         if kind in {"point", "vertex"}:
             category = "Geometry" if kind == "point" else "Topology"
             boundary_vertex = analysis_active and entity_id in self._analysis_boundary_vertex_ids
-            if not show_points and not boundary_vertex:
+            if kind == "point" and not show_points:
+                return
+            if kind == "vertex" and not show_points and not selected and self.selection_mode != "vertex":
                 return
             if self._batch_positions and not selected:
                 if labels:
@@ -2437,6 +2499,21 @@ class VtkView(QWidget):
             (0.48, 0.50, 0.53) if dimmed else
             ((1.0, 0.72, 0.08) if highlighted else front_color)
         )
+        prop = actor.GetProperty()
+        if not dimmed and not highlighted:
+            if self.material_preset == "Clay":
+                prop.SetAmbient(0.24); prop.SetDiffuse(0.72); prop.SetSpecular(0.12); prop.SetSpecularPower(18)
+                prop.SetOpacity(1.0)
+            elif self.material_preset == "Glass":
+                prop.SetAmbient(0.22); prop.SetDiffuse(0.45); prop.SetSpecular(0.75); prop.SetSpecularPower(55)
+                prop.SetOpacity(0.42)
+            elif self.material_preset == "Technical":
+                prop.SetAmbient(0.5); prop.SetDiffuse(0.5); prop.SetSpecular(0.0)
+                prop.SetOpacity(1.0)
+                prop.EdgeVisibilityOn(); prop.SetEdgeColor(0.08, 0.12, 0.18); prop.SetLineWidth(1.4)
+            else:
+                prop.SetAmbient(0.18); prop.SetDiffuse(0.72); prop.SetSpecular(0.35); prop.SetSpecularPower(32)
+                prop.SetOpacity(1.0)
         orientation_mode = getattr(self, "face_color_mode", "all-the-same") == "normals"
         selected_color = self._brighten_color(front_color, 0.4)
         if highlighted:
@@ -2468,7 +2545,8 @@ class VtkView(QWidget):
         else:
             # Planar previews are triangulated with a fan. Lighting can give
             # those triangles different normals and create a diagonal split.
-            actor.GetProperty().LightingOff()
+            if self.material_preset == "Technical":
+                actor.GetProperty().LightingOff()
         if not highlighted and not dimmed:
             if selected and orientation_mode and not self.show_mesh_edges:
                 actor.GetProperty().EdgeVisibilityOn()

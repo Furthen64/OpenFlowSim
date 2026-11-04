@@ -54,6 +54,8 @@ QPushButton:hover { background: #354357; border-color: #7186a2; }
 QPushButton:default { background: #3b82f6; border-color: #3b82f6; color: white; }
 QComboBox, QDoubleSpinBox { background: #202630; border: 1px solid #3a4656;
   border-radius: 5px; padding: 6px; min-height: 22px; }
+QPushButton#boundaryRow { text-align: left; background: #202630; border-color: #303b49; padding: 7px 9px; }
+QPushButton#removeBoundary { color: #ff9a9a; font-weight: 700; padding: 5px 10px; }
 QLabel#muted { color: #98a5b5; }
 QLabel#selectionModeLegend { color: #dce6f2; padding: 0 10px; }
 QStatusBar { background: #202630; color: #98a5b5; }
@@ -77,6 +79,8 @@ class OpenFlowWindow(QMainWindow):
         self.selected_face: int | None = None
         self.selected_entity_id: int | None = None
         self.face_roles: dict[int, str] = {}
+        self.opening_records: dict[int, dict] = {}
+        self.selected_edges: set[int] = set()
         self.opening_points = None
         self.cap_actor = None
 
@@ -119,7 +123,16 @@ class OpenFlowWindow(QMainWindow):
         title = QLabel("Flow domain")
         title.setStyleSheet("font-size: 20px; font-weight: 650;")
         panel_layout.addWidget(title)
-        panel_layout.addWidget(QLabel("Auto-fit bounds from the imported STEP scene."))
+        bounds_help = QLabel("Auto-fit bounds from the imported STEP scene.")
+        bounds_help.setWordWrap(True)
+        panel_layout.addWidget(bounds_help)
+        material_row = QHBoxLayout()
+        material_row.addWidget(QLabel("Material"))
+        self.material = QComboBox()
+        self.material.addItems(["CAD Shaded", "Clay", "Glass", "Technical", "Face Orientation"])
+        self.material.currentTextChanged.connect(self.viewport.set_material_preset)
+        material_row.addWidget(self.material, 1)
+        panel_layout.addLayout(material_row)
 
         self.bounds: dict[str, QDoubleSpinBox] = {}
         form = QFormLayout()
@@ -138,7 +151,7 @@ class OpenFlowWindow(QMainWindow):
         panel_layout.addLayout(form)
         panel_layout.addSpacing(10)
 
-        panel_layout.addWidget(QLabel("Selected face"))
+        panel_layout.addWidget(QLabel("Selection"))
         self.face_label = QLabel("None — click a surface in the viewport")
         self.face_label.setObjectName("muted")
         self.face_label.setWordWrap(True)
@@ -167,12 +180,20 @@ class OpenFlowWindow(QMainWindow):
         self.assign_action4.triggered.connect(lambda: self.assign_quick("outlet"))
         self.addAction(self.assign_action4)
 
-        self.roles_label = QLabel("No boundary faces assigned")
-        self.roles_label.setObjectName("muted")
-        self.roles_label.setWordWrap(True)
-        panel_layout.addWidget(self.roles_label)
-        panel_layout.addStretch(1)
-        hint = QLabel("Orbit: middle-drag · Pan: Shift + middle-drag · Zoom: wheel · F: focus selection")
+        assignments_heading = QLabel("Boundary assignments")
+        assignments_heading.setStyleSheet("font-weight: 650; margin-top: 8px;")
+        panel_layout.addWidget(assignments_heading)
+        self.assignments_scroll = QScrollArea()
+        self.assignments_scroll.setWidgetResizable(True)
+        self.assignments_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.assignments_container = QWidget()
+        self.assignments_layout = QVBoxLayout(self.assignments_container)
+        self.assignments_layout.setContentsMargins(0, 0, 0, 0)
+        self.assignments_layout.setSpacing(5)
+        self.assignments_scroll.setWidget(self.assignments_container)
+        self.assignments_scroll.setMinimumHeight(130)
+        panel_layout.addWidget(self.assignments_scroll, 1)
+        hint = QLabel("Orbit: middle-drag · Pan: Shift + middle-drag · Zoom: wheel · Shift-click: add edges · F: focus")
         hint.setObjectName("muted")
         hint.setWordWrap(True)
         panel_layout.addWidget(hint)
@@ -224,8 +245,15 @@ class OpenFlowWindow(QMainWindow):
     def set_selection_mode(self, mode: str) -> None:
         if mode not in {"vertex", "edge", "face", "solid"}:
             return
+        if mode != self.selection_mode:
+            self.selected_edges.clear()
+            self.viewport.set_edge_selection(())
         self.selection_mode = mode
         self.viewport.selection_mode = mode
+        if self.snapshot is not None:
+            self.selected_entity_id = None
+            self.selected_face = None
+            self.viewport.show_snapshot(self.snapshot, show_points=False)
         labels = (("1", "Vertex"), ("2", "Edge"), ("3", "Face"), ("4", "Solid"))
         parts = []
         for key, label in labels:
@@ -246,15 +274,30 @@ class OpenFlowWindow(QMainWindow):
             self.viewport.show_snapshot(self.snapshot, selected_id=entity_id)
         self.statusBar().showMessage("Vertex selected")
 
-    def select_edge(self, entity_id: int) -> None:
+    def select_edge(self, entity_id: int, additive: bool = False) -> None:
         self.selected_face = None
         self.selected_entity_id = entity_id
         self.opening_points = None
         self._remove_cap()
-        self.face_label.setText(f"STEP edge #{entity_id}")
+        if not additive:
+            self.selected_edges.clear()
+        self.selected_edges.add(entity_id)
         if self.snapshot is not None:
-            self.viewport.show_snapshot(self.snapshot, selected_id=entity_id)
-        self.statusBar().showMessage("Edge selected · right-click an aperture edge to define an opening cap")
+            self.viewport.show_snapshot(self.snapshot)
+            self.viewport.set_edge_selection(self.selected_edges)
+        if len(self.selected_edges) >= 3:
+            try:
+                self.opening_points = self._find_planar_loop(entity_id, self.selected_edges)
+                self._show_cap(self.opening_points)
+                self.face_label.setText(f"Closed loop · {len(self.selected_edges)} edges · assign inlet or outlet")
+                self.statusBar().showMessage("Closed planar loop found · press Enter to assign the cap")
+                return
+            except ValueError:
+                pass
+        self.face_label.setText(
+            f"{len(self.selected_edges)} edge{'s' if len(self.selected_edges) != 1 else ''} selected"
+        )
+        self.statusBar().showMessage("Shift-click more edges to select a loop · right-click to detect a loop automatically")
 
     def import_step_path(self, path: Path) -> None:
         self.statusBar().showMessage(f"Reading and tessellating {path.name}…")
@@ -270,8 +313,9 @@ class OpenFlowWindow(QMainWindow):
             self.geometry_builder = builder
             self.snapshot = snapshot
             self.face_roles.clear()
+            self.opening_records.clear()
             self._remove_cap()
-            self.viewport.show_snapshot(snapshot)
+            self.viewport.show_snapshot(snapshot, show_points=False)
             self._fit_domain(snapshot)
             self.statusBar().showMessage(f"{path.name} · {len(snapshot.faces)} faces")
             self._refresh_roles()
@@ -297,6 +341,9 @@ class OpenFlowWindow(QMainWindow):
             )
             return
         self.face_roles = {int(key): value for key, value in payload.get("face_roles", {}).items()}
+        self.opening_records = {
+            int(key): value for key, value in payload.get("opening_assignments", {}).items()
+        }
         for key, value in payload.get("domain", {}).items():
             if key in self.bounds:
                 self.bounds[key].setValue(float(value))
@@ -325,6 +372,7 @@ class OpenFlowWindow(QMainWindow):
             "step_sha256": digest,
             "domain": {key: self.bounds[key].value() for key in self.bounds},
             "face_roles": {str(key): value for key, value in self.face_roles.items()},
+            "opening_assignments": {str(key): value for key, value in self.opening_records.items()},
         }
         project_path = self.workspace_dir / "workspace.ofs"
         try:
@@ -417,7 +465,7 @@ class OpenFlowWindow(QMainWindow):
         if self.selected_entity_id is None or not self.viewport.focus_entity(self.selected_entity_id):
             self.statusBar().showMessage("Select a face, edge, or vertex to focus")
 
-    def _find_planar_loop(self, selected_id: int):
+    def _find_planar_loop(self, selected_id: int, selected_ids: set[int] | None = None):
         document = self.document
         point_map = self.snapshot.points
         lines = {line.entity_id: line.points for line in self.snapshot.polylines}
@@ -438,11 +486,20 @@ class OpenFlowWindow(QMainWindow):
                 if oriented is None or oriented.type_name.upper() != "ORIENTED_EDGE":
                     continue
                 refs = list(oriented.references)
-                if len(refs) < 3:
+                if not refs:
                     continue
-                start_vertex, end_vertex, edge_id = refs[0], refs[1], refs[-1]
+                edge_id = refs[-1]
+                edge = document.entity(edge_id)
+                if edge is None or edge.type_name.upper() != "EDGE_CURVE" or len(edge.references) < 2:
+                    continue
+                start_vertex, end_vertex = edge.references[:2]
+                orientation = getattr(oriented.arguments[-1], "value", "T").upper()
+                if orientation == "F":
+                    start_vertex, end_vertex = end_vertex, start_vertex
                 contains_selection |= selected_id in {oriented_id, edge_id}
                 oriented_edges.append((start_vertex, end_vertex, edge_id))
+            if selected_ids is not None and {edge_id for _, _, edge_id in oriented_edges} != selected_ids:
+                continue
             if not contains_selection or len(oriented_edges) < 3:
                 continue
             if any(oriented_edges[i][1] != oriented_edges[(i + 1) % len(oriented_edges)][0]
@@ -555,7 +612,16 @@ class OpenFlowWindow(QMainWindow):
         if self.selected_face is not None:
             self.face_roles[self.selected_face] = role
         elif self.opening_points is not None:
-            self.face_roles[-len(self.face_roles) - 1] = role
+            assignment_id = next((key for key, item in self.opening_records.items()
+                                  if item.get("edge_id") == self.selected_entity_id
+                                  and item.get("points") == self.opening_points), None)
+            if assignment_id is None:
+                assignment_id = min([0, *self.face_roles.keys()]) - 1
+            self.face_roles[assignment_id] = role
+            self.opening_records[assignment_id] = {
+                "edge_id": self.selected_entity_id,
+                "points": self.opening_points,
+            }
             self.cap_actor.GetProperty().SetColor(0.15, 0.55, 1.0 if role == "inlet" else 0.3)
             self.viewport.widget.GetRenderWindow().Render()
         self._refresh_roles()
@@ -564,13 +630,70 @@ class OpenFlowWindow(QMainWindow):
                                 f"STEP face #{self.selected_face} · {role}")
 
     def _refresh_roles(self) -> None:
+        while self.assignments_layout.count():
+            item = self.assignments_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         if not self.face_roles:
-            self.roles_label.setText("No boundary faces assigned")
+            empty = QLabel("No boundaries assigned yet")
+            empty.setObjectName("muted")
+            self.assignments_layout.addWidget(empty)
             return
-        counts: dict[str, int] = {}
-        for role in self.face_roles.values():
-            counts[role] = counts.get(role, 0) + 1
-        self.roles_label.setText("Assigned faces\n" + "\n".join(f"{name}: {count}" for name, count in counts.items()))
+        for assignment_id, role in self.face_roles.items():
+            is_opening = assignment_id < 0 or assignment_id in self.opening_records
+            label = (f"{role.title()} · Opening cap" if is_opening
+                     else f"{role.title()} · Face #{assignment_id}")
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            focus = QPushButton(label)
+            focus.setObjectName("boundaryRow")
+            focus.clicked.connect(lambda _checked=False, key=assignment_id: self.focus_boundary(key))
+            remove = QPushButton("×")
+            remove.setObjectName("removeBoundary")
+            remove.setFixedWidth(38)
+            remove.setToolTip("Remove this boundary assignment")
+            remove.clicked.connect(lambda _checked=False, key=assignment_id: self.remove_boundary(key))
+            row_layout.addWidget(focus, 1)
+            row_layout.addWidget(remove)
+            self.assignments_layout.addWidget(row)
+        self.assignments_layout.addStretch(1)
+
+    def focus_boundary(self, assignment_id: int) -> None:
+        if assignment_id < 0 and assignment_id not in self.opening_records:
+            QMessageBox.information(
+                self, "Opening needs to be selected again",
+                "This saved opening predates stored edge-loop geometry. Select its four edges again to restore the cap.",
+            )
+            return
+        if assignment_id in self.opening_records:
+            record = self.opening_records[assignment_id]
+            edge_id = int(record["edge_id"])
+            self.selected_entity_id = edge_id
+            self.selected_face = None
+            self.opening_points = [tuple(point) for point in record["points"]]
+            self._show_cap(self.opening_points)
+            self.viewport.show_snapshot(self.snapshot, selected_id=edge_id)
+            self.face_label.setText(f"Opening cap · {self.face_roles[assignment_id]}")
+            self.viewport.focus_entity(edge_id)
+        else:
+            self.selected_entity_id = assignment_id
+            self.selected_face = assignment_id
+            self.opening_points = None
+            self.viewport.show_snapshot(self.snapshot, selected_id=assignment_id)
+            self.face_label.setText(f"STEP face #{assignment_id} · {self.face_roles[assignment_id]}")
+            self.viewport.focus_entity(assignment_id)
+
+    def remove_boundary(self, assignment_id: int) -> None:
+        self.face_roles.pop(assignment_id, None)
+        self.opening_records.pop(assignment_id, None)
+        if self.opening_points is not None:
+            self.opening_points = None
+            self._remove_cap()
+        self._refresh_roles()
+        self.mark_dirty()
+        self.statusBar().showMessage("Boundary assignment removed")
 
     def closeEvent(self, event) -> None:
         if self.dirty:
@@ -590,8 +713,10 @@ class OpenFlowWindow(QMainWindow):
             if answer == QMessageBox.StandardButton.Save and not self.save_workspace():
                 event.ignore()
                 return
-        if getattr(self, "welcome_window", None) is not None:
-            self.welcome_window.show()
+        welcome = getattr(self, "welcome_window", None)
+        if welcome is not None:
+            welcome.close()
+        QApplication.quit()
         super().closeEvent(event)
 
 
