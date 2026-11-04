@@ -36,6 +36,25 @@ cargo run -p foamcore-validation -- compare backwardFacingStep \
 
 The SVGs show reference, Rust result, and absolute error panels on the mesh cell centres.
 
+Export any OpenFOAM case boundary mesh to Wavefront OBJ with `export-obj`. The
+case must contain an ASCII `constant/polyMesh`. By default, all boundary patches
+are included as OBJ groups; pass comma-separated patch names to select only some
+of them:
+
+```sh
+cargo run -p foamcore-validation -- export-obj \
+  --case icoFoamRust/cases/backwardFacingStep \
+  --output icoFoamRust/geometry/backwardFacingStep.obj
+
+cargo run -p foamcore-validation -- export-obj \
+  --case /path/to/openfoam/example \
+  --output /path/to/example.obj \
+  --patches inlet,outlet
+```
+
+The OBJ contains the selected boundary polygons and their vertices, with patch
+names preserved as groups. Internal faces are not exported.
+
 The backward-facing-step near-wall separation/reattachment and sampled `Ux` profiles can be checked and exported with:
 
 ```sh

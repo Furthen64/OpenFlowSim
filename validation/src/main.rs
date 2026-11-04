@@ -105,6 +105,18 @@ enum Commands {
         /// Case name
         case: String,
     },
+    /// Export selected OpenFOAM boundary patches as a Wavefront OBJ surface mesh
+    ExportObj {
+        /// Case directory containing constant/polyMesh
+        #[arg(long)]
+        case: PathBuf,
+        /// Output OBJ file
+        #[arg(long)]
+        output: PathBuf,
+        /// Comma-separated boundary patch names (default: all patches)
+        #[arg(long, value_delimiter = ',')]
+        patches: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -158,6 +170,12 @@ fn main() -> ExitCode {
         } => cmd_generate_reference(&case, &corpus_dir, &ref_dir, force, openfoam_env.as_deref()),
 
         Commands::CheckProvenance { ref_dir, case } => cmd_check_provenance(&ref_dir, &case),
+
+        Commands::ExportObj {
+            case,
+            output,
+            patches,
+        } => cmd_export_obj(&case, &output, &patches),
     };
 
     match result {
@@ -167,6 +185,24 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn cmd_export_obj(
+    case: &Path,
+    output: &Path,
+    patches: &[String],
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let mesh = foamcore_solver::mesh::PolyMesh::read_case(case)?;
+    let summary = foamcore_validation::obj::write_boundary_obj(&mesh, output, patches)
+        .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+    println!(
+        "OBJ written to {} ({} vertices, {} polygons, patches: {})",
+        output.display(),
+        summary.vertex_count,
+        summary.polygon_count,
+        summary.patch_names.join(", ")
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 fn load_tolerances(path: &Path) -> Result<Tolerance, Box<dyn std::error::Error>> {
