@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 import hashlib
 import json
+import math
 from math import sqrt
 from pathlib import Path
 
@@ -62,6 +63,96 @@ QStatusBar { background: #202630; color: #98a5b5; }
 """
 
 
+WORKSPACE_FORMAT = "OpenFlowSim workspace"
+WORKSPACE_FORMAT_VERSION = 1
+BOUNDARY_ROLES = {"inlet", "outlet", "wall", "symmetry", "other"}
+
+
+def _finite_number(value) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def read_workspace_file(project_path: Path) -> dict:
+    """Read and validate the supported workspace schema before opening an editor."""
+    try:
+        payload = json.loads(project_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"Could not read workspace file: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError("Workspace file must contain a JSON object.")
+    if payload.get("format") != WORKSPACE_FORMAT:
+        raise ValueError("This file is not an OpenFlowSim workspace.")
+    version = payload.get("format_version")
+    if type(version) is not int or version != WORKSPACE_FORMAT_VERSION:
+        raise ValueError(
+            f"Unsupported workspace format version {version!r}; "
+            f"this app supports version {WORKSPACE_FORMAT_VERSION}."
+        )
+    if not isinstance(payload.get("writer_version"), str):
+        raise ValueError("Workspace is missing a valid writer_version.")
+
+    step_path = payload.get("step_path")
+    if not isinstance(step_path, str) or not step_path.strip():
+        raise ValueError("Workspace is missing its STEP file path.")
+    digest = payload.get("step_sha256")
+    if not isinstance(digest, str) or len(digest) != 64 or any(
+        char not in "0123456789abcdefABCDEF" for char in digest
+    ):
+        raise ValueError("Workspace has an invalid STEP SHA-256 hash.")
+
+    domain = payload.get("domain")
+    axes = {f"{axis}{end}" for axis in "xyz" for end in ("min", "max")}
+    if not isinstance(domain, dict) or set(domain) != axes:
+        raise ValueError("Workspace domain must contain min and max bounds for x, y, and z.")
+    for axis in "xyz":
+        low, high = domain[f"{axis}min"], domain[f"{axis}max"]
+        if not _finite_number(low) or not _finite_number(high) or low >= high:
+            raise ValueError(f"Workspace has invalid {axis.upper()} domain bounds.")
+
+    roles = payload.get("face_roles")
+    if not isinstance(roles, dict):
+        raise ValueError("Workspace face_roles must be an object.")
+    for key, role in roles.items():
+        try:
+            entity_id = int(key)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid boundary entity ID: {key!r}.") from error
+        if (str(entity_id) != key or entity_id == 0 or not isinstance(role, str)
+                or role not in BOUNDARY_ROLES):
+            raise ValueError(f"Invalid boundary assignment for entity {key!r}.")
+
+    openings = payload.get("opening_assignments")
+    if not isinstance(openings, dict):
+        raise ValueError("Workspace opening_assignments must be an object.")
+    for key, record in openings.items():
+        try:
+            assignment_id = int(key)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Invalid opening assignment ID: {key!r}.") from error
+        if str(assignment_id) != key or assignment_id >= 0 or not isinstance(record, dict):
+            raise ValueError(f"Invalid opening assignment {key!r}.")
+        edge_id, points = record.get("edge_id"), record.get("points")
+        if (isinstance(edge_id, bool) or not isinstance(edge_id, int)
+                or not isinstance(points, list) or len(points) < 3):
+            raise ValueError(f"Opening assignment {key!r} has invalid edge or point data.")
+        for point in points:
+            if (not isinstance(point, (list, tuple)) or len(point) != 3
+                    or any(not _finite_number(value) for value in point)):
+                raise ValueError(f"Opening assignment {key!r} has invalid point coordinates.")
+        if roles.get(key) not in {"inlet", "outlet"}:
+            raise ValueError(f"Opening assignment {key!r} must have an inlet or outlet role.")
+
+    for key in roles:
+        if int(key) < 0 and key not in openings:
+            raise ValueError(f"Opening assignment {key!r} is missing its cap geometry data.")
+    return payload
+
+
 class OpenFlowWindow(QMainWindow):
     def __init__(self, workspace_dir: Path | None = None) -> None:
         super().__init__()
@@ -76,6 +167,7 @@ class OpenFlowWindow(QMainWindow):
         self.snapshot = None
         self.document = None
         self.geometry_builder = None
+        self.last_import_error: Exception | None = None
         self.selected_face: int | None = None
         self.selected_entity_id: int | None = None
         self.face_roles: dict[int, str] = {}
@@ -240,6 +332,21 @@ class OpenFlowWindow(QMainWindow):
         )
         if not filename:
             return
+        if self.dirty:
+            choice = QMessageBox(self)
+            choice.setWindowTitle("Unsaved workspace")
+            choice.setText("This workspace has unsaved changes. Save before importing another STEP file?")
+            choice.setStandardButtons(
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel
+            )
+            choice.setDefaultButton(QMessageBox.StandardButton.Save)
+            answer = choice.exec()
+            if answer == QMessageBox.StandardButton.Cancel:
+                return
+            if answer == QMessageBox.StandardButton.Save and not self.save_workspace():
+                return
         self.import_step_path(Path(filename))
 
     def set_selection_mode(self, mode: str) -> None:
@@ -299,7 +406,7 @@ class OpenFlowWindow(QMainWindow):
         )
         self.statusBar().showMessage("Shift-click more edges to select a loop · right-click to detect a loop automatically")
 
-    def import_step_path(self, path: Path) -> None:
+    def import_step_path(self, path: Path, *, show_error: bool = True) -> bool:
         self.statusBar().showMessage(f"Reading and tessellating {path.name}…")
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
@@ -312,41 +419,68 @@ class OpenFlowWindow(QMainWindow):
             self.document = document
             self.geometry_builder = builder
             self.snapshot = snapshot
+            self.selected_face = None
+            self.selected_entity_id = None
+            self.selected_edges.clear()
+            self.opening_points = None
+            self.face_label.setText("None — click a surface in the viewport")
             self.face_roles.clear()
             self.opening_records.clear()
             self._remove_cap()
+            self.viewport.set_edge_selection(())
             self.viewport.show_snapshot(snapshot, show_points=False)
             self._fit_domain(snapshot)
             self.statusBar().showMessage(f"{path.name} · {len(snapshot.faces)} faces")
             self._refresh_roles()
             self.mark_dirty()
+            self.last_import_error = None
+            return True
         except Exception as error:
-            QMessageBox.critical(self, "STEP import failed", str(error))
+            if show_error:
+                QMessageBox.critical(self, "STEP import failed", str(error))
             self.statusBar().showMessage("Import failed")
+            self.last_import_error = error
+            return False
         finally:
             QApplication.restoreOverrideCursor()
 
     def load_workspace(self, project_path: Path) -> None:
-        payload = json.loads(project_path.read_text(encoding="utf-8"))
+        payload = read_workspace_file(project_path)
         source = Path(payload["step_path"])
         if not source.is_file():
             raise FileNotFoundError(f"STEP source is missing: {source}")
         current_hash = hashlib.sha256(source.read_bytes()).hexdigest()
         hash_matches = current_hash == payload.get("step_sha256")
-        self.import_step_path(source)
+        if not self.import_step_path(source, show_error=False):
+            raise ValueError(f"STEP geometry could not be loaded: {self.last_import_error}")
         if not hash_matches:
             QMessageBox.warning(
                 self, "STEP geometry changed",
                 "The STEP file no longer matches this workspace. Saved face assignments were discarded; please select them again.",
             )
             return
-        self.face_roles = {int(key): value for key, value in payload.get("face_roles", {}).items()}
+        invalid_faces = [int(key) for key in payload["face_roles"]
+                         if int(key) > 0 and not self.viewport.has_rendered_face(int(key))]
+        if invalid_faces:
+            raise ValueError(
+                "Workspace boundary assignments reference faces that are absent from the STEP scene: "
+                + ", ".join(f"#{entity_id}" for entity_id in invalid_faces[:8])
+            )
+        invalid_openings = [
+            assignment_id for assignment_id, record in payload["opening_assignments"].items()
+            if not self.viewport.has_rendered_edge(record["edge_id"])
+        ]
+        if invalid_openings:
+            raise ValueError(
+                "Workspace opening assignments reference edges that are absent from the STEP scene: "
+                + ", ".join(invalid_openings[:8])
+            )
+        self.face_roles = {int(key): value for key, value in payload["face_roles"].items()}
         self.opening_records = {
-            int(key): value for key, value in payload.get("opening_assignments", {}).items()
+            int(key): value for key, value in payload["opening_assignments"].items()
         }
-        for key, value in payload.get("domain", {}).items():
-            if key in self.bounds:
-                self.bounds[key].setValue(float(value))
+        for key, value in payload["domain"].items():
+            self.bounds[key].setValue(float(value))
         self._refresh_roles()
         self.dirty = False
         self.setWindowModified(False)
@@ -365,8 +499,8 @@ class OpenFlowWindow(QMainWindow):
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(self.step_path.read_bytes()).hexdigest()
         payload = {
-            "format": "OpenFlowSim workspace",
-            "format_version": 1,
+            "format": WORKSPACE_FORMAT,
+            "format_version": WORKSPACE_FORMAT_VERSION,
             "writer_version": "0.1.0",
             "step_path": str(self.step_path.resolve()),
             "step_sha256": digest,
@@ -874,19 +1008,26 @@ QLabel#preview { background: #151a21; border: 1px solid #374252; border-radius: 
             QMessageBox.warning(self, "Workspace not saved", "This workspace has no workspace.ofs file yet.")
             return
         try:
-            editor = self.open_editor(workspace_dir)
+            editor = OpenFlowWindow(workspace_dir)
+            editor.welcome_window = self
             editor.load_workspace(project_path)
+            self._present_editor(editor)
             self.record_recent(workspace_dir)
         except Exception as error:
+            if "editor" in locals():
+                editor.deleteLater()
             QMessageBox.critical(self, "Could not open workspace", str(error))
 
     def open_editor(self, workspace_dir: Path) -> OpenFlowWindow:
         editor = OpenFlowWindow(workspace_dir)
         editor.welcome_window = self
+        self._present_editor(editor)
+        return editor
+
+    def _present_editor(self, editor: OpenFlowWindow) -> None:
         self.editor_windows.append(editor)
         self.hide()
         editor.show()
-        return editor
 
 
 def main() -> None:

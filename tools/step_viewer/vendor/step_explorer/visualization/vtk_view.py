@@ -494,6 +494,14 @@ class VtkView(QWidget):
             x, y, depth = self.renderer.GetDisplayPoint()
             return x, self.widget.height() - y, depth
 
+        def visible_at(x, y, depth):
+            # VTK's z buffer uses 0 for the near plane and 1 for the far plane.
+            # Reject projected topology hidden behind the rendered front surface.
+            zbuffer_depth = self.renderer.GetZ(
+                int(round(x)), self.widget.height() - int(round(y)) - 1,
+            )
+            return zbuffer_depth >= 1.0 or depth <= zbuffer_depth + 1e-4
+
         # STEP models often render the same geometric edge through both its
         # EDGE_CURVE and ORIENTED_EDGE. Prefer the underlying curve entities.
         lines = [line for line in self._last_snapshot.polylines
@@ -511,7 +519,11 @@ class VtkView(QWidget):
                 t = 0.0 if length2 <= 1e-9 else max(0.0, min(1.0, ((click_x - ax) * dx + (click_y - ay) * dy) / length2))
                 nearest_x, nearest_y = ax + t * dx, ay + t * dy
                 distance2 = (click_x - nearest_x) ** 2 + (click_y - nearest_y) ** 2
+                if distance2 > 18.0 ** 2:
+                    continue
                 depth = az + t * (bz - az)
+                if not visible_at(nearest_x, nearest_y, depth):
+                    continue
                 candidate = (distance2, depth, line.entity_id)
                 if best is None or candidate < best:
                     best = candidate
@@ -545,6 +557,11 @@ class VtkView(QWidget):
             x, y, depth = self.renderer.GetDisplayPoint()
             y = self.widget.height() - y
             distance2 = (position.x() - x) ** 2 + (position.y() - y) ** 2
+            if distance2 > 16.0 ** 2:
+                continue
+            zbuffer_depth = self.renderer.GetZ(int(round(x)), self.widget.height() - int(round(y)) - 1)
+            if zbuffer_depth < 1.0 and depth > zbuffer_depth + 1e-4:
+                continue
             candidate = (distance2, depth, entity_id)
             if best is None or candidate < best:
                 best = candidate
@@ -552,6 +569,9 @@ class VtkView(QWidget):
 
     def has_rendered_face(self, entity_id: int | None) -> bool:
         return entity_id in self._face_actors
+
+    def has_rendered_edge(self, entity_id: int | None) -> bool:
+        return entity_id in self._edge_actors
 
     def focus_face(self, entity_id: int) -> bool:
         """Center the orbit target on a rendered face without changing camera distance."""
