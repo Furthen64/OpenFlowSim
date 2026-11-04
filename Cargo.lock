@@ -193,6 +193,7 @@ name = "foamcore-validation"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "foamcore-solver",
  "hex",
  "serde",
  "serde_json",

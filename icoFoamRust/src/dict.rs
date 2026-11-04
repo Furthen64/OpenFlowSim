@@ -37,7 +37,10 @@ impl Value {
     }
 
     pub fn as_f64(&self) -> Option<f64> {
-        self.as_str().and_then(|s| s.parse().ok())
+        match self {
+            Value::Tokens(tokens) => tokens.first().and_then(|s| s.parse().ok()),
+            Value::Block(_) => None,
+        }
     }
 
     pub fn as_usize(&self) -> Option<usize> {
@@ -96,7 +99,11 @@ pub fn read_file(path: &Path) -> Result<Dict, DictError> {
 
 fn parse(text: &str, path: &Path) -> Result<Dict, DictError> {
     let tokens = tokenize(&strip_comments(text));
-    let mut parser = Parser { tokens: &tokens, pos: 0, path };
+    let mut parser = Parser {
+        tokens: &tokens,
+        pos: 0,
+        path,
+    };
     // Skip the FoamFile header block if present
     if parser.peek() == Some("FoamFile") {
         parser.advance();
@@ -185,10 +192,13 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
                 Ok(Value::Tokens(
-                    items.into_iter().filter_map(|v| match v {
-                        Value::Tokens(t) => t.into_iter().next(),
-                        _ => None,
-                    }).collect(),
+                    items
+                        .into_iter()
+                        .filter_map(|v| match v {
+                            Value::Tokens(t) => t.into_iter().next(),
+                            _ => None,
+                        })
+                        .collect(),
                 ))
             }
             _ => {
@@ -337,7 +347,10 @@ mod tests {
     fn list_value() {
         let d = parse_str("cells (1 2 3);\n");
         let v = d.get("cells").unwrap();
-        assert_eq!(v.tokens(), &vec!["1".to_string(), "2".to_string(), "3".to_string()]);
+        assert_eq!(
+            v.tokens(),
+            &vec!["1".to_string(), "2".to_string(), "3".to_string()]
+        );
     }
 
     #[test]

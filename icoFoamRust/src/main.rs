@@ -40,8 +40,7 @@ fn cli_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             print_setup(&setup);
         }
         Command::Run { case } => {
-            let _setup = foamcore_icofoam::CaseSetup::read(&case)?;
-            println!("Solver not yet implemented. Case loaded successfully from {}", case.display());
+            foamcore_icofoam::piso::run_case(&case)?;
         }
     }
     Ok(())
@@ -54,10 +53,7 @@ fn print_setup(setup: &foamcore_icofoam::CaseSetup) {
     println!("  endTime:       {}", c.end_time);
     println!("  deltaT:        {}", c.delta_t);
     println!("  numSteps:      {}", c.num_steps());
-    println!(
-        "  writeControl:  {:?}",
-        c.write_control
-    );
+    println!("  writeControl:  {:?}", c.write_control);
     println!("  writeInterval: {}", c.write_interval);
     println!("  writeFormat:   {}", c.write_format);
 
@@ -68,10 +64,7 @@ fn print_setup(setup: &foamcore_icofoam::CaseSetup) {
     for (expr, scheme) in &s.div_schemes {
         println!("  {}:     {}", expr, scheme.join(" "));
     }
-    println!(
-        "  laplacian:     {}",
-        s.laplacian_default.join(" ")
-    );
+    println!("  laplacian:     {}", s.laplacian_default.join(" "));
     println!("  interpolation: {}", s.interpolation_default);
 
     let f = &setup.solution;

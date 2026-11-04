@@ -21,6 +21,7 @@ pub struct SolverConfig {
 
 #[derive(Debug, Clone)]
 pub struct PisoConfig {
+    pub momentum_predictor: bool,
     pub n_correctors: usize,
     pub n_non_orthogonal_correctors: usize,
     pub p_ref_cell: usize,
@@ -31,6 +32,7 @@ impl Default for PisoConfig {
     fn default() -> Self {
         Self {
             n_correctors: 2,
+            momentum_predictor: true,
             n_non_orthogonal_correctors: 0,
             p_ref_cell: 0,
             p_ref_value: 0.0,
@@ -46,7 +48,10 @@ impl FvSolution {
         if let Some(solvers_block) = d.get_block("solvers") {
             for (field_name, val) in &solvers_block.entries {
                 if let Some(block) = val.as_block() {
-                    let solver = block.get_str("solver").unwrap_or("smoothSolver").to_string();
+                    let solver = block
+                        .get_str("solver")
+                        .unwrap_or("smoothSolver")
+                        .to_string();
                     let preconditioner = block.get_str("preconditioner").map(String::from);
                     let smoother = block.get_str("smoother").map(String::from);
                     let tolerance = block.get_f64("tolerance").unwrap_or(1e-7);
@@ -63,8 +68,9 @@ impl FvSolution {
             }
         }
 
-        let piso = if let Some(piso_block) = d.get_block("PISO") {
+        let piso = if let Some(piso_block) = d.get_block("PISO").or_else(|| d.get_block("PIMPLE")) {
             PisoConfig {
+                momentum_predictor: !matches!(piso_block.get_str("momentumPredictor"), Some("no" | "false")),
                 n_correctors: piso_block.get_usize("nCorrectors").unwrap_or(2),
                 n_non_orthogonal_correctors: piso_block
                     .get_usize("nNonOrthogonalCorrectors")

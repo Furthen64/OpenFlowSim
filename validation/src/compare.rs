@@ -70,7 +70,10 @@ impl fmt::Display for ComparisonResult {
         if !self.passed {
             if let Some(idx) = self.first_violation_index {
                 let (c, r) = self.first_violation_values.unwrap_or((0.0, 0.0));
-                write!(f, "\n  first violation at index {idx}: computed={c:.12e}, ref={r:.12e}")?;
+                write!(
+                    f,
+                    "\n  first violation at index {idx}: computed={c:.12e}, ref={r:.12e}"
+                )?;
             }
         }
         Ok(())
@@ -81,7 +84,12 @@ impl fmt::Display for ComparisonResult {
 #[derive(Debug, thiserror::Error)]
 pub enum CompareError {
     #[error("Field dimension mismatch: '{a}' has {} values, '{b}' has {}", .a_n, .b_n)]
-    DimensionMismatch { a: String, b: String, a_n: usize, b_n: usize },
+    DimensionMismatch {
+        a: String,
+        b: String,
+        a_n: usize,
+        b_n: usize,
+    },
     #[error("Field type mismatch: '{a}' is {:?}, '{b}' is {:?}", .a.field_type, .b.field_type)]
     TypeMismatch { a: Field, b: Field },
     #[error("Mesh hash mismatch: fields were computed on different meshes")]
@@ -94,7 +102,11 @@ pub enum CompareError {
 ///
 /// Returns `Ok(ComparisonResult)` for numerical pass/fail,
 /// or `Err(CompareError)` for structural/data-integrity failures.
-pub fn compare_fields(a: &Field, b: &Field, tol: &Tolerance) -> Result<ComparisonResult, CompareError> {
+pub fn compare_fields(
+    a: &Field,
+    b: &Field,
+    tol: &Tolerance,
+) -> Result<ComparisonResult, CompareError> {
     // Structural checks first
     if a.n_values != b.n_values {
         return Err(CompareError::DimensionMismatch {
@@ -121,7 +133,11 @@ pub fn compare_fields(a: &Field, b: &Field, tol: &Tolerance) -> Result<Compariso
     if a.has_non_finite() || b.has_non_finite() {
         return Err(CompareError::NonFiniteValues(format!(
             "{} (in {})",
-            if a.has_non_finite() { "computed" } else { "reference" },
+            if a.has_non_finite() {
+                "computed"
+            } else {
+                "reference"
+            },
             a.name
         )));
     }
@@ -162,7 +178,11 @@ pub fn compare_fields(a: &Field, b: &Field, tol: &Tolerance) -> Result<Compariso
         (sum_sq / sum_ref_sq).sqrt()
     } else {
         // Reference is all zeros — use absolute measure
-        if sum_sq > 0.0 { f64::INFINITY } else { 0.0 }
+        if sum_sq > 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        }
     };
 
     let passed = first_violation.is_none();
@@ -187,6 +207,29 @@ pub fn compare_fields(a: &Field, b: &Field, tol: &Tolerance) -> Result<Compariso
     })
 }
 
+/// Compare fields using a relative L2 threshold, as used by CFD validation
+/// targets that specify a norm rather than a pointwise tolerance.
+pub fn compare_fields_rel_l2(
+    a: &Field,
+    b: &Field,
+    max_relative_l2: f64,
+) -> Result<ComparisonResult, CompareError> {
+    let mut result = compare_fields(
+        a,
+        b,
+        &Tolerance {
+            atol: f64::MAX,
+            rtol: 0.0,
+        },
+    )?;
+    result.passed = result.rel_l2_error <= max_relative_l2;
+    result.tolerance = Tolerance {
+        atol: 0.0,
+        rtol: max_relative_l2,
+    };
+    Ok(result)
+}
+
 /// Get component `c` of field at index `i`.
 fn get_component(field: &Field, i: usize, c: usize) -> f64 {
     match field.field_type {
@@ -206,7 +249,13 @@ pub fn gauge_align(a: &mut Field, b: &Field) {
     if a.n_values != b.n_values || a.n_values == 0 {
         return;
     }
-    let offset: f64 = a.values.iter().zip(b.values.iter()).map(|(x, y)| x - y).sum::<f64>() / a.n_values as f64;
+    let offset: f64 = a
+        .values
+        .iter()
+        .zip(b.values.iter())
+        .map(|(x, y)| x - y)
+        .sum::<f64>()
+        / a.n_values as f64;
     for i in 0..a.n_values {
         a.values[i] -= offset;
     }
@@ -220,7 +269,10 @@ mod tests {
     fn test_identical_fields_pass() {
         let a = Field::scalar("phi", vec![1.0, 2.0, 3.0]);
         let b = Field::scalar("phi", vec![1.0, 2.0, 3.0]);
-        let tol = Tolerance { atol: 1e-10, rtol: 1e-8 };
+        let tol = Tolerance {
+            atol: 1e-10,
+            rtol: 1e-8,
+        };
         let result = compare_fields(&a, &b, &tol).unwrap();
         assert!(result.passed);
         assert_eq!(result.max_abs_error, 0.0);
@@ -230,7 +282,10 @@ mod tests {
     fn test_small_difference_passes() {
         let a = Field::scalar("phi", vec![1.0, 2.0, 3.0]);
         let b = Field::scalar("phi", vec![1.0 + 1e-12, 2.0 - 1e-12, 3.0 + 1e-12]);
-        let tol = Tolerance { atol: 1e-10, rtol: 1e-8 };
+        let tol = Tolerance {
+            atol: 1e-10,
+            rtol: 1e-8,
+        };
         let result = compare_fields(&a, &b, &tol).unwrap();
         assert!(result.passed);
     }
@@ -239,7 +294,10 @@ mod tests {
     fn test_large_difference_fails() {
         let a = Field::scalar("phi", vec![1.0, 2.0, 3.0]);
         let b = Field::scalar("phi", vec![1.0, 2.0, 5.0]);
-        let tol = Tolerance { atol: 1e-10, rtol: 1e-8 };
+        let tol = Tolerance {
+            atol: 1e-10,
+            rtol: 1e-8,
+        };
         let result = compare_fields(&a, &b, &tol).unwrap();
         assert!(!result.passed);
         assert_eq!(result.first_violation_index, Some(2));
@@ -251,7 +309,10 @@ mod tests {
         let b = Field::scalar("phi", vec![1.0, 2.0]);
         let tol = Tolerance::default();
         let result = compare_fields(&a, &b, &tol);
-        assert!(matches!(result, Err(CompareError::DimensionMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(CompareError::DimensionMismatch { .. })
+        ));
     }
 
     #[test]
@@ -267,7 +328,10 @@ mod tests {
     fn test_vector_field_comparison() {
         let a = Field::vector("U", vec![1.0, 2.0], vec![0.0, 0.0], vec![0.0, 0.0]);
         let b = Field::vector("U", vec![1.0 + 1e-9, 2.0], vec![1e-11, 0.0], vec![0.0, 0.0]);
-        let tol = Tolerance { atol: 1e-8, rtol: 1e-6 };
+        let tol = Tolerance {
+            atol: 1e-8,
+            rtol: 1e-6,
+        };
         let result = compare_fields(&a, &b, &tol).unwrap();
         assert!(result.passed);
         assert!(result.max_component_errors.is_some());
@@ -289,7 +353,10 @@ mod tests {
         // Near zero, absolute tolerance dominates
         let a = Field::scalar("phi", vec![1e-15]);
         let b = Field::scalar("phi", vec![0.0]);
-        let tol = Tolerance { atol: 1e-10, rtol: 1e-8 };
+        let tol = Tolerance {
+            atol: 1e-10,
+            rtol: 1e-8,
+        };
         let result = compare_fields(&a, &b, &tol).unwrap();
         assert!(result.passed); // 1e-15 < 1e-10
     }
@@ -298,9 +365,21 @@ mod tests {
     fn test_rmse_computation() {
         let a = Field::scalar("phi", vec![0.0, 0.0]);
         let b = Field::scalar("phi", vec![1.0, -1.0]);
-        let tol = Tolerance { atol: 1.0, rtol: 1.0 };
+        let tol = Tolerance {
+            atol: 1.0,
+            rtol: 1.0,
+        };
         let result = compare_fields(&a, &b, &tol).unwrap();
         // RMSE = sqrt((1+1)/2) = 1.0
         assert!((result.rmse - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn relative_l2_comparison_uses_norm_threshold() {
+        let reference = Field::scalar("p", vec![1.0, 2.0, 3.0]);
+        let computed = Field::scalar("p", vec![1.001, 2.0, 3.0]);
+        let result = compare_fields_rel_l2(&computed, &reference, 1e-3).unwrap();
+        assert!(result.passed);
+        assert!(result.rel_l2_error < 1e-3);
     }
 }

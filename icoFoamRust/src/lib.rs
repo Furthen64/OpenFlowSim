@@ -1,5 +1,6 @@
 //! Rust implementation of OpenFOAM icoFoam (transient incompressible laminar Navier-Stokes).
 
+pub mod bc;
 pub mod control_dict;
 pub mod dict;
 pub mod fv_matrix;
@@ -7,6 +8,7 @@ pub mod fv_ops;
 pub mod fv_schemes;
 pub mod fv_solution;
 pub mod physical_props;
+pub mod piso;
 pub mod scalar_field;
 pub mod time_dirs;
 

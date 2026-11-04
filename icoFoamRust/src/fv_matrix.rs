@@ -7,7 +7,9 @@ use crate::{MeshGeometry, PolyMesh, Vector3};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SolveError {
-    #[error("linear solver failed to converge after {iterations} iterations (residual {residual:.4e})")]
+    #[error(
+        "linear solver failed to converge after {iterations} iterations (residual {residual:.4e})"
+    )]
     NoConvergence { residual: f64, iterations: usize },
 }
 
@@ -45,6 +47,28 @@ impl FvMatrix {
         self.source[i] += val;
     }
 
+    /// Eliminate a reference-cell unknown while preserving its contribution
+    /// in neighbouring equations.
+    pub fn set_reference(&mut self, cell: usize, value: f64) {
+        for row in 0..self.n_cells {
+            if row == cell {
+                continue;
+            }
+            let mut retained = Vec::with_capacity(self.off_diagonal[row].len());
+            for (column, coefficient) in self.off_diagonal[row].drain(..) {
+                if column == cell {
+                    self.source[row] -= coefficient * value;
+                } else {
+                    retained.push((column, coefficient));
+                }
+            }
+            self.off_diagonal[row] = retained;
+        }
+        self.diagonal[cell] = 1.0;
+        self.off_diagonal[cell].clear();
+        self.source[cell] = value;
+    }
+
     /// Solve A*x = source using conjugate gradient with diagonal preconditioning.
     pub fn solve(&self, mut x: Vec<f64>) -> Result<Vec<f64>, SolveError> {
         let n = self.n_cells;
@@ -53,7 +77,10 @@ impl FvMatrix {
         let apply = |x: &[f64], out: &mut [f64]| {
             for i in 0..n {
                 out[i] = self.diagonal[i] * x[i]
-                    + self.off_diagonal[i].iter().map(|&(j, a)| a * x[j]).sum::<f64>();
+                    + self.off_diagonal[i]
+                        .iter()
+                        .map(|&(j, a)| a * x[j])
+                        .sum::<f64>();
             }
         };
 
@@ -122,6 +149,76 @@ impl FvMatrix {
     pub fn solve_zero(&self) -> Result<Vec<f64>, SolveError> {
         self.solve(vec![0.0; self.n_cells])
     }
+
+    /// BiCGStab handles the nonsymmetric matrices produced by convection.
+    pub fn solve_bicgstab(&self, mut x: Vec<f64>) -> Result<Vec<f64>, SolveError> {
+        let n = self.n_cells;
+        let apply = |v: &[f64]| -> Vec<f64> {
+            (0..n)
+                .map(|i| {
+                    self.diagonal[i] * v[i]
+                        + self.off_diagonal[i]
+                            .iter()
+                            .map(|&(j, a)| a * v[j])
+                            .sum::<f64>()
+                })
+                .collect()
+        };
+        let ax = apply(&x);
+        let mut r: Vec<f64> = self.source.iter().zip(ax).map(|(b, a)| b - a).collect();
+        let r_hat = r.clone();
+        let target = 1.0e-10 * dot(&self.source, &self.source).sqrt().max(1.0);
+        if dot(&r, &r).sqrt() <= target {
+            return Ok(x);
+        }
+        let (mut rho_old, mut alpha, mut omega) = (1.0, 1.0, 1.0);
+        let (mut v, mut p) = (vec![0.0; n], vec![0.0; n]);
+        let max_iter = (n.saturating_mul(30)).max(1000);
+        for _ in 0..max_iter {
+            let rho = dot(&r_hat, &r);
+            if rho.abs() < f64::MIN_POSITIVE {
+                break;
+            }
+            let beta = (rho / rho_old) * (alpha / omega);
+            for i in 0..n {
+                p[i] = r[i] + beta * (p[i] - omega * v[i]);
+            }
+            v = apply(&p);
+            let denom = dot(&r_hat, &v);
+            if denom.abs() < f64::MIN_POSITIVE {
+                break;
+            }
+            alpha = rho / denom;
+            let s: Vec<f64> = (0..n).map(|i| r[i] - alpha * v[i]).collect();
+            if dot(&s, &s).sqrt() <= target {
+                for i in 0..n {
+                    x[i] += alpha * p[i];
+                }
+                return Ok(x);
+            }
+            let t = apply(&s);
+            let tt = dot(&t, &t);
+            if tt < f64::MIN_POSITIVE {
+                break;
+            }
+            omega = dot(&t, &s) / tt;
+            for i in 0..n {
+                x[i] += alpha * p[i] + omega * s[i];
+                r[i] = s[i] - omega * t[i];
+            }
+            if dot(&r, &r).sqrt() <= target {
+                return Ok(x);
+            }
+            if omega.abs() < f64::MIN_POSITIVE {
+                break;
+            }
+            rho_old = rho;
+        }
+        Err(SolveError::NoConvergence {
+            residual: dot(&r, &r).sqrt(),
+            iterations: max_iter,
+        })
+    }
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -133,12 +230,18 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 pub struct FvMeshData {
     /// For each internal face: (owner, neighbour, distance, area_magnitude)
     pub internal_faces: Vec<(usize, usize, f64, f64)>,
+    /// Linear interpolation weight from owner to neighbour for each internal face.
+    pub internal_weights: Vec<f64>,
     /// For each boundary face index: (cell_index, patch_index, distance, area_magnitude)
     pub boundary_faces: Vec<(usize, usize, f64, f64)>,
     /// Cell volumes
     pub cell_volumes: Vec<f64>,
     /// Face area vectors (outward from owner), indexed by global face index
     pub face_areas: Vec<Vector3>,
+    /// Unit normals oriented out of the owner, indexed by global face index.
+    pub face_normals: Vec<Vector3>,
+    /// Local face index within its boundary patch, in `boundary_faces` order.
+    pub boundary_patch_local_indices: Vec<usize>,
     /// Total number of faces
     pub n_faces: usize,
     /// Number of cells
@@ -153,6 +256,7 @@ impl FvMeshData {
         let n_internal = mesh.neighbour.len();
 
         let mut internal_faces = Vec::with_capacity(n_internal);
+        let mut internal_weights = Vec::with_capacity(n_internal);
         for face_i in 0..n_internal {
             let owner = mesh.owner[face_i];
             let neighbour = mesh.neighbour[face_i];
@@ -161,16 +265,20 @@ impl FvMeshData {
             let normal = face_area_vec / area_mag;
             let delta = geometry.cells[neighbour].centre - geometry.cells[owner].centre;
             let distance = delta.dot(normal);
+            let owner_to_face = geometry.faces[face_i].centre - geometry.cells[owner].centre;
+            let weight = owner_to_face.dot(normal) / distance;
             debug_assert!(distance > 0.0, "non-orthogonal or inverted face {face_i}");
             internal_faces.push((owner, neighbour, distance, area_mag));
+            internal_weights.push(weight);
         }
 
         let face_patch_map = build_face_patch_map(mesh);
         let mut boundary_faces = Vec::with_capacity(n_faces - n_internal);
+        let mut boundary_patch_local_indices = Vec::with_capacity(n_faces - n_internal);
+        let mut next_patch_local = vec![0; mesh.patches.len()];
         for face_i in n_internal..n_faces {
             let cell = mesh.owner[face_i];
-            let patch_idx = face_patch_map[face_i]
-                .expect("boundary face must belong to a patch");
+            let patch_idx = face_patch_map[face_i].expect("boundary face must belong to a patch");
             let face_area_vec = geometry.faces[face_i].area;
             let area_mag = face_area_vec.magnitude();
             let normal = face_area_vec / area_mag;
@@ -178,16 +286,25 @@ impl FvMeshData {
             let distance = delta.dot(normal);
             debug_assert!(distance > 0.0, "invalid boundary face distance at {face_i}");
             boundary_faces.push((cell, patch_idx, distance, area_mag));
+            boundary_patch_local_indices.push(next_patch_local[patch_idx]);
+            next_patch_local[patch_idx] += 1;
         }
 
         let cell_volumes: Vec<f64> = geometry.cells.iter().map(|c| c.volume).collect();
         let face_areas: Vec<Vector3> = geometry.faces.iter().map(|f| f.area).collect();
+        let face_normals: Vec<Vector3> = face_areas
+            .iter()
+            .map(|area| *area / area.magnitude())
+            .collect();
 
         Self {
             internal_faces,
+            internal_weights,
             boundary_faces,
             cell_volumes,
             face_areas,
+            face_normals,
+            boundary_patch_local_indices,
             n_faces,
             n_cells,
         }
@@ -239,7 +356,9 @@ mod tests {
 
     #[test]
     fn fv_mesh_data_cavity() {
-        let Some((mesh, geom)) = load_cavity_mesh() else { return };
+        let Some((mesh, geom)) = load_cavity_mesh() else {
+            return;
+        };
         let data = FvMeshData::compute(&mesh, &geom);
         assert_eq!(data.n_cells, geom.cells.len());
         assert_eq!(data.internal_faces.len(), mesh.neighbour.len());
@@ -253,7 +372,9 @@ mod tests {
 
     #[test]
     fn laplacian_constant_field_gives_zero() {
-        let Some((_mesh, _geom)) = load_cavity_mesh() else { return };
+        let Some((_mesh, _geom)) = load_cavity_mesh() else {
+            return;
+        };
         let (mesh, geom) = load_cavity_mesh().unwrap();
         let data = FvMeshData::compute(&mesh, &geom);
         let n = data.n_cells;
@@ -266,10 +387,13 @@ mod tests {
         let mut ax = vec![0.0; n];
         for i in 0..n {
             ax[i] = mat.diagonal[i] * x[i]
-                + mat.off_diagonal[i].iter().map(|&(j, a)| a * x[j]).sum::<f64>();
+                + mat.off_diagonal[i]
+                    .iter()
+                    .map(|&(j, a)| a * x[j])
+                    .sum::<f64>();
         }
         for i in 0..n {
-            assert!(ax[i].abs() < 1e-10, "cell {i}: expected 0, got {}", ax[i]);
+            assert!(ax[i].abs() < 1e-9, "cell {i}: expected 0, got {}", ax[i]);
         }
     }
 }

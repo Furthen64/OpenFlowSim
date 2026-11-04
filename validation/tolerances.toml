@@ -24,6 +24,11 @@ atol = 1e-10
 rtol = 1e-8
 gauge_align = true
 
+[fields.p]
+atol = 1e-10
+rtol = 1e-5
+gauge_align = true
+
 [cases.simpleChannel]
 [cases.simpleChannel.fields.U]
 atol = 1e-12
@@ -38,3 +43,48 @@ rtol = 1e-6
 [cases.pitzDaily.fields.U]
 atol = 1e-8
 rtol = 1e-6
+
+[cases.cavity.fields.U]
+atol = 1e-10
+rtol = 1e-5
+relative_l2 = 1e-5
+
+[cases.cavity.fields.p]
+atol = 1e-10
+rtol = 1e-5
+relative_l2 = 1e-5
+
+[cases.cavity.fields.phi]
+atol = 1e-12
+rtol = 1e-5
+relative_l2 = 1e-5
+
+[cases.pipeFlow.fields.U]
+atol = 1e-10
+rtol = 1e-5
+relative_l2 = 1e-5
+
+[cases.pipeFlow.fields.p]
+atol = 1e-10
+rtol = 1e-5
+relative_l2 = 1e-5
+
+[cases.pipeFlow.fields.phi]
+atol = 1e-12
+rtol = 1e-5
+relative_l2 = 1e-5
+
+[cases.backwardFacingStep.fields.U]
+atol = 1e-10
+rtol = 1e-5
+relative_l2 = 1e-5
+
+[cases.backwardFacingStep.fields.p]
+atol = 1e-10
+rtol = 1e-5
+relative_l2 = 1e-5
+
+[cases.backwardFacingStep.fields.phi]
+atol = 1e-12
+rtol = 1e-5
+relative_l2 = 1e-5
